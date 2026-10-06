@@ -17,6 +17,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.provider.Settings;
 import android.text.format.DateFormat;
 import android.util.Log;
 
@@ -45,6 +46,9 @@ public class WRightService extends Service implements LocationListener,
     private static final long FULL_RECOMPUTE_INTERVAL_MS = 60_000; // brightness/night-shift smoothness
     private static final long LOCATION_MIN_TIME_MS = 10 * 60_000;
     private static final long BRIGHTNESS_REASSERT_DELAY_MS = 500;
+    // Grace period after sunset before Night Shift's warmth starts ramping, so dark mode visibly
+    // switches first instead of both changes landing in the same instant.
+    private static final long NIGHT_SHIFT_START_DELAY_MS = 5_000;
 
     // Status.KEY_BRIGHTNESS_PCT sentinels distinguishing *why* nothing's being applied, since
     // "disabled by the user" and "nighttime, deferred to CarSettings' own profile" look
@@ -69,6 +73,15 @@ public class WRightService extends Service implements LocationListener,
     // Lights-Override-forced uiMode flips - null means "unknown yet" so the very first tick after
     // a fresh start never misfires as a transition. See primeOrTransitionNightProfiles().
     private Boolean lastNightWindow = null;
+
+    // Edge-detection for the settled (uiMode, headlight) combination CarSettingService actually
+    // resolves brightness off - used to react precisely when Lights Override settles into
+    // night+headlights-on or day+headlights-off (the two profiles that matter without root, since
+    // we can't keep their table entries primed) rather than on every tick or every toggle. The
+    // other two combinations (day+headlights-on, night+headlights-off) are deliberately ignored -
+    // see WRightService's day-headlight-override design discussion.
+    private boolean lastNightLightsOnSettled = false;
+    private boolean lastDayHeadlightsOffSettled = false;
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override
@@ -279,23 +292,48 @@ public class WRightService extends Service implements LocationListener,
         }
         lastNightWindow = nightWindow;
 
+        boolean currentlyDark = ThemeControl.isDarkActive(this);
+
         Log.i(TAG, "tick: now=" + new Date(now) + " sunrise=" + new Date(sun.sunriseUtcMillis)
                 + " sunset=" + new Date(sun.sunsetUtcMillis) + " nightWindow=" + nightWindow
                 + " darkModeEnabled=" + darkModeEnabled + " lightsOverride=" + lightsOverrideEnabled
                 + " headlightsOn=" + headlightsOn + " effectiveDark=" + effectiveDark
-                + " currentlyDark=" + ThemeControl.isDarkActive(this) + " fullTick=" + fullTick);
+                + " currentlyDark=" + currentlyDark + " fullTick=" + fullTick);
 
-        boolean toggled = ThemeControl.setDark(this, effectiveDark);
-        if (toggled) {
-            // CarSettingService re-resolves its own 4-profile brightness table whenever
-            // ui_night_mode changes, which can stomp our last screen_brightness write - reassert
-            // shortly after so our curve wins.
+        // Refresh the brightness profile tables on EVERY tick, before the broadcast below, not
+        // just when we can see a toggle coming. CarSettingService appears to react to the raw
+        // headlight_state property change by itself (not only to our ui_night_mode broadcast),
+        // so by the time our own tick even notices headlightsOn flipped, it may have already
+        // re-resolved brightness off whatever was last sitting in the table - priming only right
+        // before our own setDark() call was still too late in that case. Keeping the table
+        // continuously current removes the timing dependency entirely.
+        applyBrightness();
+
+        // Settled-state edge detection for the Lights-Override-during-day case: CarSettingService
+        // resolves brightness off the combination of uiMode and headlight state, and without root
+        // we can't keep every profile's table entry primed ahead of time - only the live write
+        // works unconditionally. Reassert right after landing on either of the two profiles that
+        // actually matter here (night+headlights-on, day+headlights-off), not on every toggle and
+        // not on the other two combinations (day+headlights-on, night+headlights-off), which are
+        // deliberately left alone. At night this is moot anyway: applyBrightness() no-ops once
+        // nightWindow is true, so this can't regress the real schedule-based transition.
+        boolean nightLightsOnSettled = effectiveDark && headlightsOn;
+        boolean dayHeadlightsOffSettled = !effectiveDark && !headlightsOn;
+        boolean enteringNightLightsOn = nightLightsOnSettled && !lastNightLightsOnSettled;
+        boolean enteringDayHeadlightsOff = dayHeadlightsOffSettled && !lastDayHeadlightsOffSettled;
+        lastNightLightsOnSettled = nightLightsOnSettled;
+        lastDayHeadlightsOffSettled = dayHeadlightsOffSettled;
+
+        ThemeControl.setDark(this, effectiveDark);
+        if (enteringNightLightsOn || enteringDayHeadlightsOff) {
+            // Give CarSettingService's resolver time to actually stomp screen_brightness off its
+            // broadcast first, then correct it - reacting synchronously here would just get
+            // overwritten moments later once that resolution actually runs.
             mainHandler.postDelayed(this::applyBrightness, BRIGHTNESS_REASSERT_DELAY_MS);
         }
 
         if (fullTick) {
             applyNightShift(now, sun);
-            applyBrightness();
         }
 
         updateNotification(sun, nightWindow);
@@ -337,7 +375,12 @@ public class WRightService extends Service implements LocationListener,
 
         double fraction;
         if (now >= sun.sunsetUtcMillis) {
-            fraction = clamp01((now - sun.sunsetUtcMillis) / (double) fadeMs);
+            // Dark mode itself flips the instant nightWindow goes true, same as sunset - delaying
+            // the START of the warmth ramp (not the ramp's own speed) means the screen visibly
+            // goes dark first, and only a few seconds later does it begin to warm up, instead of
+            // both changes appearing to land at once.
+            long elapsedSinceSunset = now - sun.sunsetUtcMillis - NIGHT_SHIFT_START_DELAY_MS;
+            fraction = clamp01(elapsedSinceSunset / (double) fadeMs);
         } else if (now < sun.sunriseUtcMillis) {
             long untilSunrise = sun.sunriseUtcMillis - now;
             fraction = untilSunrise < fadeMs ? clamp01(untilSunrise / (double) fadeMs) : 1.0;
@@ -349,15 +392,32 @@ public class WRightService extends Service implements LocationListener,
 
     private void applyBrightness() {
         boolean enabled = Prefs.getBool(this, Prefs.KEY_BRIGHTNESS_ENABLED, false);
-        if (!enabled || !hasFix) {
+        if (!hasFix) {
             Status.putInt(this, Status.KEY_BRIGHTNESS_PCT, STATUS_BRIGHTNESS_DISABLED);
             return;
         }
 
         long now = TimeSource.nowMillis(this);
         SunCalculator.SunTimes sun = computeEffectiveSunTimes(now);
+        boolean isDaytime = now >= sun.sunriseUtcMillis && now < sun.sunsetUtcMillis;
+        Log.i(TAG, "applyBrightness: enabled=" + enabled + " isDaytime=" + isDaytime
+                + " headlightsOn=" + headlightsOn + " hasWriteSettings=" + BrightnessControl.hasPermission(this));
 
-        if (now < sun.sunriseUtcMillis || now >= sun.sunsetUtcMillis) {
+        if (!enabled) {
+            // Day Brightness itself is off, so the user's brightness is whatever they set
+            // manually (stock slider/hardware). Still keep the NIGHT profile keys primed with
+            // that live value while it's daytime, same reasoning as the curve branch below: if
+            // Lights Override forces dark mode mid-day, CarSettingService must read a value that
+            // matches what's actually on screen right now, not stale night data.
+            if (isDaytime) {
+                int current = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS, -1);
+                if (current > 0) BrightnessControl.primeNightProfiles(this, current);
+            }
+            Status.putInt(this, Status.KEY_BRIGHTNESS_PCT, STATUS_BRIGHTNESS_DISABLED);
+            return;
+        }
+
+        if (!isDaytime) {
             // Nighttime: stay completely hands-off. CarSettingService's own night-profile
             // resolver (screen_brightness_night_*, triggered by our dark-mode toggle) owns
             // screen_brightness after dark - we were previously still writing minPct here every

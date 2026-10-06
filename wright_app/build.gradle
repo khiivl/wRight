@@ -2,6 +2,12 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
 android {
     namespace 'com.radiorubka.wright'
     compileSdk 36
@@ -12,17 +18,31 @@ android {
         //noinspection ExpiredTargetSdkVersion
         targetSdk 29
         versionCode 1
-        versionName "0.1"
+        versionName "1"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
         vectorDrawables.useSupportLibrary = true
     }
 
+    signingConfigs {
+        release {
+            if (keystorePropertiesFile.exists()) {
+                storeFile rootProject.file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (keystorePropertiesFile.exists()) {
+                signingConfig signingConfigs.release
+            }
         }
     }
     compileOptions {
