@@ -10,6 +10,7 @@ Features:
 2. Headlights Override feature to turn on Dark Mode during the day when the lights are on. Brightness stays the same.
 3. Automatic brightness adjustment during the day, static during the night.
 4. Backlight RGB adjustment from the app with HEX color input.
+5. Preset I/O, so you can backup the settings between factory resets. 
 
 The app employs a clever algorithm to "prime" all the brightness values during the day, so that there is no brightness flicker during preset changes. The problem is that this only works with root, since there is no way to write the settings type these values live in. 
 
@@ -22,7 +23,7 @@ Overall there are 4 brightness presets on K706 head units:
 4. Dark mode, headlights on
 
 Without root, only the current brightness is writeable. 
-With root you can write into all 4 presets at the same time. 
+With root, you can write into all 4 presets at the same time. 
 
 How to use:
 Install, add to sleep whitelist in 8888. 
