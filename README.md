@@ -14,7 +14,7 @@ Features:
 
 The app employs a clever algorithm to "prime" all the brightness values during the day, so that there is no brightness flicker during preset changes. The problem is that this only works with root, since there is no way to write the settings type these values live in. 
 
-So without root, you will get some brightness flicker during daytime "Headlights Override" ttansition.
+So without root, you will get some brightness flicker during daytime "Headlights Override" transition.
 
 Overall there are 4 brightness presets on K706 head units:
 1. Light mode, headlights off
