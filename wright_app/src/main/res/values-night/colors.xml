@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="text_theme_aware">#E0E0E0</color>
+    <color name="text_theme_aware_2">#BDBDBD</color>
+    <color name="text_theme_aware_3">#CCBDBDBD</color>
+    <color name="cyan_custom">#79bcbd</color>
+    <color name="custom_square">#15BDBDBD</color>
+    <color name="card_bg">#f029292B</color>
+
+    <color name="card_dark_mode">#79bcbd</color>
+    <color name="card_lights_override">#61a9c2</color>
+    <color name="card_night_shift">#6593bf</color>
+    <color name="card_brightness">#7b79ae</color>
+    <color name="card_backlight">#8f5d8d</color>
+
+    <color name="btn_import_bg">#8f5d8d</color>
+    <color name="btn_export_bg">#7b79ae</color>
+    <color name="colored_button_text">#000000</color>
+
+    <color name="pastel_red">#EF9A9A</color>
+    <color name="pastel_green">#A5D6A7</color>
+    <color name="pastel_blue">#90CAF9</color>
+
+    <color name="tick_color_inactive">#66000000</color>
+    <color name="tick_color_active">#99000000</color>
+    <color name="track_color_active">#79bcbd</color>
+    <color name="track_color_inactive">#66BDBDBD</color>
+
+    <color name="stroke_color">#66000000</color>
+    <color name="stroke_color_top">#66000000</color>
+    <color name="status_bar">#000000</color>
+
+    <color name="toast_bg">#1A1A1C</color>
+    <color name="toast_stroke">#66000000</color>
+</resources>

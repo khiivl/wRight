@@ -1,0 +1,12 @@
+<resources>
+    <style name="Base.Theme.WRight" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/cyan_custom</item>
+        <!-- false here (unlike the light theme) so status bar icons render light-on-dark,
+             matching app_background's dark gradient instead of disappearing into it. -->
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:soundEffectsEnabled">false</item>
+        <item name="android:fontFamily">@font/main_font</item>
+        <item name="android:statusBarColor">@color/transparent</item>
+        <item name="fontFamily">@font/main_font</item>
+    </style>
+</resources>

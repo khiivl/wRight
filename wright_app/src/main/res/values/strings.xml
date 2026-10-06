@@ -1,0 +1,63 @@
+<resources>
+    <string name="app_name">wRight</string>
+
+    <string name="card_dark_mode_title">Dark Mode</string>
+    <string name="card_dark_mode_subtitle">Switches theme at sunset / sunrise</string>
+    <string name="fader_sunrise">Sunrise</string>
+    <string name="fader_sunset">Sunset</string>
+
+    <string name="card_night_shift_title">Night Shift</string>
+    <string name="card_night_shift_subtitle">Warms the display at sunset</string>
+    <string name="fader_intensity">Intensity</string>
+    <string name="fader_fade">Fade</string>
+    <string name="system_settings">Settings</string>
+    <string name="settings_open_failed">Couldn\'t open system settings</string>
+
+    <string name="card_lights_override_title">Lights Override</string>
+    <string name="card_lights_override_subtitle">Headlights force Dark Mode during the day</string>
+
+    <string name="card_brightness_title">Day Brightness</string>
+    <string name="card_brightness_subtitle">Ramps between min / max over the day</string>
+    <string name="fader_min">Min</string>
+    <string name="fader_max">Max</string>
+
+    <string name="card_backlight_title">Backlight Color</string>
+    <string name="card_backlight_subtitle">Sets the ambient light RGB</string>
+    <string name="fader_red">Red</string>
+    <string name="fader_green">Green</string>
+    <string name="fader_blue">Blue</string>
+    <string name="hex_hint">#RRGGBB</string>
+
+    <string name="status_title">Status</string>
+    <string name="status_location">Location:</string>
+    <string name="status_gps_time">GPS Time:</string>
+    <string name="status_headlight">Headlight state:</string>
+    <string name="status_sunrise">Sunrise time:</string>
+    <string name="status_sunset">Sunset time:</string>
+    <string name="status_brightness">Current brightness level:</string>
+    <string name="status_no_fix">No fix yet</string>
+    <string name="status_on">ON</string>
+    <string name="status_off">OFF</string>
+    <string name="status_disabled">Disabled</string>
+    <string name="status_night_stock">Night (stock profile)</string>
+    <string name="status_dash">—</string>
+
+    <string name="btn_import">Import</string>
+    <string name="btn_export">Export</string>
+    <string name="export_success">Exported</string>
+    <string name="import_success">Imported</string>
+    <string name="import_failed">Import failed - not a wRight export</string>
+
+    <string name="notif_channel_name">wRight</string>
+    <string name="notif_channel_desc">Keeps the sunset/sunrise schedule running</string>
+    <string name="notif_title">wRight is watching the sky</string>
+    <string name="notif_text_waiting">Waiting for a GPS fix…</string>
+    <string name="notif_text_active">Next: %1$s at %2$s</string>
+
+    <string name="setup_banner_location">Location permission needed to compute sunrise/sunset. Tap to grant.</string>
+    <string name="setup_banner_write_settings">Brightness control needs the \"Modify system settings\" permission. Tap to grant.</string>
+    <string name="setup_banner_secure_settings">Night Shift needs a one-time ADB grant. Run this from a PC with the unit connected:\n\nadb shell pm grant %1$s android.permission.WRITE_SECURE_SETTINGS</string>
+    <string name="setup_banner_battery">Disable battery optimization for wRight so it keeps running. Tap to open settings.</string>
+    <string name="copy">Copy</string>
+    <string name="copied">Copied</string>
+</resources>

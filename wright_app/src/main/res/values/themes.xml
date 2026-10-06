@@ -1,0 +1,47 @@
+<resources>
+    <!-- Base application theme. -->
+    <style name="Base.Theme.WRight" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/cyan_custom</item>
+        <item name="android:statusBarColor">@color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <!-- Painting the window itself (not just the content view) with app_background means
+             it also fills the status-bar inset area, so the bar reads as part of the gradient
+             instead of a flat solid-color strip (the symptom wDSP's own transparent status bar
+             was going for, but only gets by coincidence since fitsSystemWindows pads content
+             away from that area - windowBackground covers the whole window regardless). -->
+        <item name="android:windowBackground">@drawable/app_background</item>
+        <item name="android:fontFamily">@font/main_font</item>
+        <item name="fontFamily">@font/main_font</item>
+        <item name="android:soundEffectsEnabled">false</item>
+    </style>
+
+    <style name="Theme.WRight" parent="Base.Theme.WRight" />
+
+    <!-- Standard Text Styles (copied from wDSP) -->
+    <style name="TextTitle">
+        <item name="android:textSize">@dimen/text_size_title</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/text_theme_aware</item>
+    </style>
+
+    <style name="TextHeader">
+        <item name="android:textSize">@dimen/text_size_header</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/text_theme_aware</item>
+    </style>
+
+    <style name="TextLabel">
+        <item name="android:textSize">@dimen/text_size_label</item>
+        <item name="android:textColor">@color/text_theme_aware</item>
+    </style>
+
+    <style name="TextValue">
+        <item name="android:textSize">@dimen/text_size_label</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/text_theme_aware_2</item>
+    </style>
+
+    <style name="ShapeAppearance.Square" parent="ShapeAppearance.Material3.SmallComponent">
+        <item name="cornerSize">@dimen/button_radius</item>
+    </style>
+</resources>

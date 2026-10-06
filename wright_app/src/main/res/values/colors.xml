@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="text_theme_aware">#212121</color>
+    <color name="text_theme_aware_2">#757575</color>
+    <color name="text_theme_aware_3">#CC757575</color>
+    <color name="cyan_custom">#028889</color>
+    <color name="launcher_bg">#1C1F26</color>
+    <color name="custom_square">#15757575</color>
+    <!-- wDSP's ui_bg_layer card fill -->
+    <color name="card_bg">#f0EBEBEA</color>
+    <color name="transparent">#00000000</color>
+
+    <!-- Card accent colors - wDSP's preset-button palette (Auto/Add/Rename/Export/Import),
+         assigned in that same left-to-right order to the cards in their on-screen order:
+         Dark Mode, Lights Override, Night Shift, Day Brightness, Backlight Color. -->
+    <color name="card_dark_mode">#028889</color>
+    <color name="card_lights_override">#0085a4</color>
+    <color name="card_night_shift">#2b7db6</color>
+    <color name="card_brightness">#6f70b4</color>
+    <color name="card_backlight">#9f5e9d</color>
+
+    <!-- Import/Export buttons (wDSP's own preset-IO colors) -->
+    <color name="btn_import_bg">#9f5e9d</color>
+    <color name="btn_export_bg">#6f70b4</color>
+    <color name="colored_button_text">#FFFFFF</color>
+
+    <!-- Pastel RGB slider colors - deeper tones here for contrast against the near-white
+         light card background; the night variants use lighter tones that pop on near-black. -->
+    <color name="pastel_red">#E57373</color>
+    <color name="pastel_green">#81C784</color>
+    <color name="pastel_blue">#64B5F6</color>
+
+    <!-- Slider (fader) colors -->
+    <color name="tick_color_inactive">#99FFFFFF</color>
+    <color name="tick_color_active">#99FFFFFF</color>
+    <color name="track_color_active">#028889</color>
+    <color name="track_color_inactive">#66757575</color>
+    <color name="halo_color">#00000000</color>
+
+    <color name="stroke_color">#66000000</color>
+    <color name="stroke_color_top">#66FFFFFF</color>
+    <color name="status_bar">#FFFFFF</color>
+
+    <color name="toast_bg">#FFFFFF</color>
+    <color name="toast_stroke">#66000000</color>
+</resources>
