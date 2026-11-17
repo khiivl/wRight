@@ -44,7 +44,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int REQ_EXPORT = 200;
     private static final int REQ_IMPORT = 201;
 
-    private FlexboxLayout cardContainer;
+    private FlexboxLayout cardContainer, canContainer, targetContainer;
     private LinearLayout bannerContainer;
 
     private TextView statusLocationValue;
@@ -127,6 +127,7 @@ public class MainActivity extends AppCompatActivity {
         applyStatusBarIconContrast();
 
         cardContainer = findViewById(R.id.card_container);
+        canContainer = findViewById(R.id.can_container);
         bannerContainer = findViewById(R.id.banner_container);
 
         setupStatusPanel();
@@ -298,6 +299,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void buildCards() {
         cardContainer.removeAllViews();
+        canContainer.removeAllViews();
+        targetContainer = cardContainer;
 
         boolean landscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
         float basis = landscape ? 50f : 100f;
@@ -336,6 +339,8 @@ public class MainActivity extends AppCompatActivity {
         addCard(R.string.card_backlight_title, R.string.card_backlight_subtitle,
                 null, true, R.color.card_backlight, 100f, this::buildBacklightCard);
 
+        // the CAN integration is an internal feature: its own section at the very bottom, below the status and import/export
+        targetContainer = canContainer;
         addCard(R.string.card_can_lights_title, R.string.card_can_lights_subtitle,
                 Prefs.KEY_LIGHTS_FROM_CAN, true, R.color.card_lights_override, basis, null);
 
@@ -370,7 +375,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void addCard(int titleRes, int subtitleRes, String prefKey, boolean defaultOn,
                           int accentColorRes, float flexBasisPercent, FaderBuilder faders) {
-        View cardView = LayoutInflater.from(this).inflate(R.layout.item_feature_card, cardContainer, false);
+        View cardView = LayoutInflater.from(this).inflate(R.layout.item_feature_card, targetContainer, false);
         MaterialCardView card = cardView.findViewById(R.id.card_root);
         TextView title = cardView.findViewById(R.id.card_title);
         TextView subtitle = cardView.findViewById(R.id.card_subtitle);
@@ -406,7 +411,7 @@ public class MainActivity extends AppCompatActivity {
         lp.setFlexBasisPercent(flexBasisPercent / 100f);
         lp.setAlignSelf(AlignItems.FLEX_START);
         cardView.setLayoutParams(lp);
-        cardContainer.addView(cardView);
+        targetContainer.addView(cardView);
     }
 
     /** Accent color only shows up on the switch when it's ON; OFF always reads as a neutral

@@ -24,6 +24,7 @@
     <string name="card_backlight_title">Backlight Color</string>
     <string name="card_backlight_subtitle">Sets the ambient light RGB</string>
 
+    <string name="section_can">Vehicle (CAN, via wFabia)</string>
     <string name="card_can_lights_title">Headlights from CAN</string>
     <string name="card_can_lights_subtitle">Lights state from the car\'s CAN bus via wFabia, no ILL wire needed</string>
     <string name="card_dimmer_title">Dimmer</string>
