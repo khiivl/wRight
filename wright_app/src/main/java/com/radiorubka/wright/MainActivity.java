@@ -285,6 +285,8 @@ public class MainActivity extends AppCompatActivity {
         int brightnessPct = Status.getInt(this, Status.KEY_BRIGHTNESS_PCT, -1);
         if (brightnessPct == -2) {
             statusBrightnessValue.setText(R.string.status_night_stock);
+        } else if (brightnessPct == -3) {
+            statusBrightnessValue.setText(R.string.status_manual);
         } else if (brightnessPct < 0) {
             statusBrightnessValue.setText(R.string.status_disabled);
         } else {

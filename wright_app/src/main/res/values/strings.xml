@@ -45,6 +45,7 @@
     <string name="status_headlight">Headlight state:</string>
     <string name="status_sunrise">Sunrise time:</string>
     <string name="status_sunset">Sunset time:</string>
+    <string name="status_manual">Manual (until next wake)</string>
     <string name="status_brightness">Current brightness level:</string>
     <string name="status_no_fix">No fix yet</string>
     <string name="status_on">ON</string>

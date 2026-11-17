@@ -56,6 +56,7 @@ public class WRightService extends Service implements LocationListener,
     // identical to a tester watching the Status panel otherwise.
     private static final int STATUS_BRIGHTNESS_DISABLED = -1;
     private static final int STATUS_BRIGHTNESS_NIGHT = -2;
+    private static final int STATUS_BRIGHTNESS_MANUAL = -3;
 
     private HandlerThread workerThread;
     private Handler bgHandler;
@@ -109,6 +110,8 @@ public class WRightService extends Service implements LocationListener,
     private static final long MANUAL_SETTLE_MS = 5_000;
     private long manualSettleUntilMs;
     private int lastSeenLive = -1;
+    /** the user set the brightness by hand in the daytime: the day curve stays off until the next wake (ACC_ON) or sunset */
+    private volatile boolean manualDayOverride;
 
     // Edge-detection for the settled (uiMode, headlight) combination CarSettingService actually
     // resolves brightness off - used to react precisely when Lights Override settles into
@@ -129,6 +132,7 @@ public class WRightService extends Service implements LocationListener,
                     accOn = true;
                     manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;
                     lastSeenLive = -1;
+                    manualDayOverride = false;
                     captureNightBrightnessIfMissing();
                     restartLocationUpdates();
                     startTickLoop();
@@ -529,6 +533,7 @@ public class WRightService extends Service implements LocationListener,
         // BEFORE setDark() below fires the TEST_UIMODE broadcast, since CarSettingService resolves
         // its brightness profile synchronously off that same broadcast.
         if (lastNightWindow != null && !lastNightWindow && nightWindow) {
+            manualDayOverride = false;                 // a new night: the next day starts with the curve again
             restoreSavedNightBrightness();
         } else if (lastNightWindow != null && lastNightWindow && !nightWindow) {
             captureNightBrightness();
@@ -628,7 +633,7 @@ public class WRightService extends Service implements LocationListener,
         }
     }
 
-    /** At night, with the CAN dimmer not driving the screen: when the live brightness changes and it was not our write and not
+    /** With the CAN dimmer not driving the screen, at night: when the live brightness changes and it was not our write and not
      *  a reaction to a headlight edge / uiMode flip / wake (those open a settle window), the user moved it. Save it as their
      *  night brightness for the current headlight state, so the restore at sunset and the headlight-edge handler use it.
      *  With the dimmer driving, the value is the wheel's, never the user's: nothing is saved. */
@@ -636,7 +641,8 @@ public class WRightService extends Service implements LocationListener,
         int live = BrightnessControl.readLive(this, -1);
         long now = SystemClock.elapsedRealtime();
         boolean night = Boolean.TRUE.equals(lastNightWindow);
-        if (live <= 0 || !accOn || !night || dimmerActive() || dimmerWasActive || now < manualSettleUntilMs
+        boolean day = Boolean.FALSE.equals(lastNightWindow);
+        if (live <= 0 || !accOn || !(night || day) || dimmerActive() || dimmerWasActive || now < manualSettleUntilMs
                 || lastSeenLive <= 0) {
             lastSeenLive = live;
             return;
@@ -644,6 +650,15 @@ public class WRightService extends Service implements LocationListener,
         if (live == lastSeenLive) return;
         lastSeenLive = live;
         if (live == BrightnessControl.lastLiveWritten()) return;
+        if (day) {
+            // by hand in the daytime: the day curve stops until the next wake, and the night keys get this value (when the
+            // lights override can need them) instead of the curve's
+            if (!manualDayOverride) Log.i(TAG, "manual day brightness " + live + ": day curve paused until the next wake");
+            manualDayOverride = true;
+            if (lightsOverrideOn()) BrightnessControl.primeNightProfiles(this, live);
+            Status.putInt(this, Status.KEY_BRIGHTNESS_PCT, STATUS_BRIGHTNESS_MANUAL);
+            return;
+        }
         Log.i(TAG, "manual night brightness " + live + " (headlights " + (headlightsOn ? "on" : "off") + ") saved");
         Prefs.putInt(this, headlightsOn ? Prefs.KEY_SAVED_NIGHT_HEADLIGHT_BRIGHTNESS : Prefs.KEY_SAVED_NIGHT_NO_HEADLIGHT_BRIGHTNESS, live);
         BrightnessControl.setNightProfile(this, headlightsOn, live);
@@ -710,6 +725,12 @@ public class WRightService extends Service implements LocationListener,
             // tick regardless of day/night, which fought that resolver every 60s and was the
             // actual cause of "brightness doesn't update properly on profile change".
             Status.putInt(this, Status.KEY_BRIGHTNESS_PCT, STATUS_BRIGHTNESS_NIGHT);
+            return;
+        }
+
+        if (manualDayOverride) {
+            // the user set the brightness by hand: leave it alone (and the day profile keys with it) until the next wake
+            Status.putInt(this, Status.KEY_BRIGHTNESS_PCT, STATUS_BRIGHTNESS_MANUAL);
             return;
         }
 
