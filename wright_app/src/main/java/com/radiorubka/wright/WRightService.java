@@ -83,6 +83,10 @@ public class WRightService extends Service implements LocationListener,
     private boolean dimmerLoopRunning, dimmerWasActive;
     private long lastDimmerStepMs, lastDisplayAssertMs, lastButtonsWriteMs;
     private int lastDisplayWritten = -1, lastButtonsRgb = -1;
+    /** the last dimmed button colour the dimmer wrote (-1 none). Survives the dimmer's release and an ACC cycle, so the wake
+     *  puts the strip back at that colour instead of at the user's full one. Also kept in Prefs for a service restart. */
+    private int lastDimmedRgb = -1;
+    private static final String PREF_LAST_DIMMED_RGB = "last_dimmed_rgb";
     // The display has about 15 integer steps, smoothing only adds delay there. The button colour has 256 steps per channel
     // and gets a very light interpolation, so the filtered level reaches both within a frame or two.
     private final DimmerMap.Smoother displaySmoother = new DimmerMap.Smoother(1f);
@@ -118,7 +122,15 @@ public class WRightService extends Service implements LocationListener,
                     recomputeAndApply(true);
                     // The ambient strip's own memory of its color doesn't necessarily survive
                     // the MCU's side of a sleep cycle - reassert ours so it's not left stale.
-                    BacklightColorControl.apply(Prefs.getInt(WRightService.this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889));
+                    // If the lights were on when the ignition went off, the dimmer was driving the strip: bring it back at the
+                    // last dimmed colour. The user's full colour here is the flash of full brightness on wake; the dimmer takes
+                    // over as soon as wFabia's state is fresh again (and releaseDimmer restores the full colour if it never does).
+                    int dimmedOnWake = wakeDimmedColour();
+                    if (dimmedOnWake != -1) {
+                        BacklightColorControl.apply(dimmedOnWake, false);
+                    } else {
+                        BacklightColorControl.apply(Prefs.getInt(WRightService.this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889));
+                    }
                     // The MCU forgets what we told it across its own sleep cycle, and CarSettings sends its stored
                     // headlight_enable again at every start: say it again.
                     mcuSentState = -1;
@@ -132,6 +144,12 @@ public class WRightService extends Service implements LocationListener,
                     break;
                 case ACTION_ACC_OFF:
                     accOn = false;
+                    // The dimmed colour goes into the persistent property too (the one the head unit restores from on its next
+                    // start), so a restore from it comes back dim, and releaseDimmer leaves the strip alone while the ignition is off.
+                    if (headlightsOn && lastDimmedRgb != -1 && Prefs.getBool(WRightService.this, Prefs.KEY_DIMMER_ENABLED, false)) {
+                        Prefs.putInt(WRightService.this, PREF_LAST_DIMMED_RGB, lastDimmedRgb);
+                        BacklightColorControl.apply(lastDimmedRgb, true);
+                    }
                     TimeSource.onAccOff(WRightService.this);
                     stopTickLoop();
                     try {
@@ -404,6 +422,7 @@ public class WRightService extends Service implements LocationListener,
             if (rgb != lastButtonsRgb && now - lastButtonsWriteMs >= BUTTONS_MIN_GAP_MS) {
                 BacklightColorControl.apply(rgb, false);
                 lastButtonsRgb = rgb;
+                lastDimmedRgb = rgb;
                 lastButtonsWriteMs = now;
             }
             if (!dimmerWasActive) Log.i(TAG, "dimmer ACTIVE: level " + level);
@@ -415,13 +434,22 @@ public class WRightService extends Service implements LocationListener,
         }
     }
 
+    /** the colour for the strip on ACC_ON: the last dimmed one if the dimmer is on and the lights were on at ACC_OFF, else -1 */
+    private int wakeDimmedColour() {
+        if (!headlightsOn || !Prefs.getBool(this, Prefs.KEY_DIMMER_ENABLED, false)) return -1;
+        if (lastDimmedRgb == -1) lastDimmedRgb = Prefs.getInt(this, PREF_LAST_DIMMED_RGB, -1);
+        return lastDimmedRgb;
+    }
+
     /** the dimmer stops driving: the user's own colour back on the buttons, and the display back to what wRight's own
      *  logic (the day curve) or the user's night profile says */
     private void releaseDimmer() {
         Log.i(TAG, "dimmer released");
         // Lights off with the CAN state in charge: the MCU switches the strip off, and its colour stays the last dimmed one
         // so it comes back at that colour (not at full) when the lights go on. Otherwise the user's colour goes back.
-        boolean keepDimmedColour = !headlightsOn && canIsSource();
+        // Also kept while the ignition is off: the pipe going stale then is not the lights going off, and the user's full colour
+        // written now is what the head unit would come back with on wake.
+        boolean keepDimmedColour = (!headlightsOn && canIsSource()) || !accOn;
         if (!keepDimmedColour) {
             BacklightColorControl.apply(Prefs.getInt(this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889));
             lastButtonsRgb = -1;
