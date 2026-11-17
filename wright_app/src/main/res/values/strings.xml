@@ -23,6 +23,17 @@
 
     <string name="card_backlight_title">Backlight Color</string>
     <string name="card_backlight_subtitle">Sets the ambient light RGB</string>
+
+    <string name="card_can_lights_title">Headlights from CAN</string>
+    <string name="card_can_lights_subtitle">Lights state from the car\'s CAN bus via wFabia, no ILL wire needed</string>
+    <string name="card_dimmer_title">Dimmer</string>
+    <string name="card_dimmer_subtitle">Display and button backlight follow the car\'s dimmer wheel while the lights are on</string>
+    <string name="card_dimmer_night_title">Dimmer only at night</string>
+    <string name="card_dimmer_night_subtitle">By day with the lights on, wRight\'s own logic stays in charge</string>
+    <string name="fader_display_min">Display min</string>
+    <string name="fader_display_max">Display max</string>
+    <string name="fader_buttons_min">Buttons min</string>
+    <string name="fader_buttons_max">Buttons max</string>
     <string name="fader_red">Red</string>
     <string name="fader_green">Green</string>
     <string name="fader_blue">Blue</string>

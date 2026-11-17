@@ -52,9 +52,30 @@ public class NightShiftControl {
         float clamped = Math.max(0f, Math.min(1f, intensity01));
         int level = Math.round(LEVEL_NEUTRAL - clamped * (LEVEL_NEUTRAL - LEVEL_WARMEST));
         level = Math.max(LEVEL_WARMEST, Math.min(LEVEL_NEUTRAL, level)); // defensive: never send outside the confirmed valid 1-64 domain
-        Log.i(TAG, "apply: featureEnabled=" + featureEnabled + " intensity=" + clamped + " -> level=" + level);
-        putIntSafely(context, KEY_ACTIVATED, featureEnabled ? 1 : 0);
-        putIntSafely(context, KEY_TEMPERATURE, level);
+        // Reconcile, don't just write: this runs on every service tick, reads what the system really has and
+        // corrects only a difference. A one-shot write that nobody ever checks is how Night Shift ended up "not always
+        // working": anything that resets these keys after wRight's write (a wake from suspend, CarSettings, the user in
+        // the system UI) stayed wrong until the next unrelated write. The log line says what had to be corrected.
+        int wantActivated = featureEnabled ? 1 : 0;
+        int haveActivated = getIntSafely(context, KEY_ACTIVATED, -1);
+        int haveLevel = getIntSafely(context, KEY_TEMPERATURE, -1);
+        if (haveActivated != wantActivated) {
+            Log.i(TAG, "reconcile: night_display_activated " + haveActivated + " -> " + wantActivated);
+            putIntSafely(context, KEY_ACTIVATED, wantActivated);
+        }
+        if (haveLevel != level) {
+            Log.i(TAG, "reconcile: night_display_color_temperature " + haveLevel + " -> " + level
+                    + " (featureEnabled=" + featureEnabled + " intensity=" + clamped + ")");
+            putIntSafely(context, KEY_TEMPERATURE, level);
+        }
+    }
+
+    private static int getIntSafely(Context context, String key, int def) {
+        try {
+            return Settings.Secure.getInt(context.getContentResolver(), key, def);
+        } catch (RuntimeException e) {
+            return def;
+        }
     }
 
     private static void putIntSafely(Context context, String key, int value) {

@@ -23,7 +23,16 @@ public class ThemeControl {
     /** Returns true if a toggle broadcast was actually sent (i.e. the mode needed to change). */
     public static boolean setDark(Context context, boolean wantDark) {
         if (wantDark == isDarkActive(context)) return false;
+        // The broadcast is a pure toggle and the system takes a moment to apply it. Without this guard the next 1.5 s tick
+        // could still see the old mode and toggle again, flipping the theme straight back (an intermittent "didn't switch").
+        // Give the first toggle time to take effect before sending another.
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastToggleAt < TOGGLE_SETTLE_MS) return false;
+        lastToggleAt = now;
         context.sendBroadcast(new Intent(ACTION_TOGGLE));
         return true;
     }
+
+    private static final long TOGGLE_SETTLE_MS = 6_000;
+    private static long lastToggleAt = -TOGGLE_SETTLE_MS;
 }

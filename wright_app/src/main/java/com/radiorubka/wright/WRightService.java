@@ -17,6 +17,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.format.DateFormat;
 import android.util.Log;
@@ -66,8 +67,29 @@ public class WRightService extends Service implements LocationListener,
     private boolean hasFix = false;
 
     private boolean headlightsOn = false;
-    private long lastFullRecompute = 0;
+    // Elapsed-realtime based (SystemClock): the wall clock of this unit jumps (GPS/NTP corrections, suspend), and a jump
+    // backwards used to keep the "60 s since the last full recompute" test false for as long as the jump was big.
+    private long lastFullRecompute = -FULL_RECOMPUTE_INTERVAL_MS;
     private boolean accOn = true;
+
+    // --- headlights and dimmer without the ILL wire -------------------------------------------------------------
+    // wFabia (the only owner of the CAN adapter) hands the car's lights and dimmer wheel level over a binder pipe.
+    private VehiclePipeClient pipe;
+    private volatile boolean canValid, canLightsOn;
+    private volatile int canLevel;
+    private boolean lastEffectiveDark;
+    private int mcuSentState = -1;              // the lights state last passed to the MCU / the property: -1 none, 0 off, 1 on
+    private long lastMcuAssertMs;
+    private boolean dimmerLoopRunning, dimmerWasActive;
+    private long lastDimmerStepMs, lastDisplayAssertMs, lastButtonsWriteMs;
+    private int lastDisplayWritten = -1, lastButtonsRgb = -1;
+    // The display has about 15 integer steps, smoothing only adds delay there. The button colour has 256 steps per channel
+    // and gets a very light interpolation, so the filtered level reaches both within a frame or two.
+    private final DimmerMap.Smoother displaySmoother = new DimmerMap.Smoother(1f);
+    private final DimmerMap.Smoother buttonsSmoother = new DimmerMap.Smoother(50f);
+    private static final long DIMMER_LOOP_MS = 40, BUTTONS_MIN_GAP_MS = 60;
+    private static final String PROP_HEADLIGHT_STATE = "sys.qf.vehicle.headlight_state";
+    private static final long MCU_REASSERT_MS = 30_000;
 
     // Edge-detection for the real (clock-based) day<->night transition, independent of
     // Lights-Override-forced uiMode flips - null means "unknown yet" so the very first tick after
@@ -97,6 +119,12 @@ public class WRightService extends Service implements LocationListener,
                     // The ambient strip's own memory of its color doesn't necessarily survive
                     // the MCU's side of a sleep cycle - reassert ours so it's not left stale.
                     BacklightColorControl.apply(Prefs.getInt(WRightService.this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889));
+                    // The MCU forgets what we told it across its own sleep cycle, and CarSettings sends its stored
+                    // headlight_enable again at every start: say it again.
+                    mcuSentState = -1;
+                    syncMcu(true);
+                    dimmerWasActive = false;
+                    lastButtonsRgb = -1;
                     // Belt and suspenders: if the user poked around in CarSettings and
                     // re-enabled its own auto-dark-mode logic, put it back to sleep on every wake
                     // rather than only once at service startup.
@@ -126,10 +154,10 @@ public class WRightService extends Service implements LocationListener,
             // the whole service process. A bad tick should log and retry next cycle, never take
             // the schedule down with it.
             try {
-                boolean fullTick = System.currentTimeMillis() - lastFullRecompute >= FULL_RECOMPUTE_INTERVAL_MS;
-                pollHeadlight();
+                boolean fullTick = SystemClock.elapsedRealtime() - lastFullRecompute >= FULL_RECOMPUTE_INTERVAL_MS;
+                pollHeadlight();                // also repeats the MCU state every 30 s
                 recomputeAndApply(fullTick);
-                if (fullTick) lastFullRecompute = System.currentTimeMillis();
+                if (fullTick) lastFullRecompute = SystemClock.elapsedRealtime();
             } catch (Exception e) {
                 Log.e(TAG, "Tick failed, will retry next cycle", e);
             } finally {
@@ -166,6 +194,16 @@ public class WRightService extends Service implements LocationListener,
         startTickLoop();
         recomputeAndApply(true);
         ConfigServiceControl.disableStockAutoDarkMode(this);
+
+        pipe = new VehiclePipeClient(this, bgHandler, (valid, lights, level) -> {
+            canValid = valid;
+            canLightsOn = valid && lights;
+            canLevel = level;
+            pollHeadlight();                 // react at once, not on the next 1.5 s tick
+            if (dimmerLoopRunning) dimmerStep();   // and drive the outputs now, not on the next loop tick
+        });
+        pipe.start();
+        updateDimmerLoop();
     }
 
     @Override
@@ -180,6 +218,8 @@ public class WRightService extends Service implements LocationListener,
         try { locationManager.removeUpdates(this); } catch (SecurityException ignored) {}
         Prefs.get(this).unregisterOnSharedPreferenceChangeListener(this);
         stopTickLoop();
+        dimmerLoopRunning = false;
+        if (pipe != null) pipe.stop();
         workerThread.quitSafely();
     }
 
@@ -233,13 +273,169 @@ public class WRightService extends Service implements LocationListener,
         bgHandler.removeCallbacks(tickRunnable);
     }
 
+    /**
+     * "Headlights on" is decided here, from up to two sources: the MCU's headlight state (the ILL wire, through the vendor
+     * property) and the car's CAN bus (through wFabia). With the ILL wire disconnected, or the MCU told to stop reporting
+     * (mcu_headlight_off), only the CAN source counts and wRight alone decides. The CAN source is also faster: the MCU holds
+     * its state for several seconds after the switch goes off.
+     */
     private void pollHeadlight() {
-        boolean on = SysProp.getBoolean("sys.qf.vehicle.headlight_state", false);
+        boolean canSource = canIsSource();
+        boolean canOn = canSource && canLightsOn;
+        // while the CAN state is fresh it alone decides; otherwise the MCU's own state (the ILL wire) is the fallback
+        boolean on = canSource ? canOn : SysProp.getBoolean(PROP_HEADLIGHT_STATE, false);
         Status.putBool(this, Status.KEY_HEADLIGHTS_ON, on);
         if (on != headlightsOn) {
+            Log.i(TAG, "headlights " + (on ? "ON" : "OFF") + " (source=" + (canSource ? "can" : "mcu") + " pipe=" + (pipe == null ? "-" : pipe.status()) + ")");
             headlightsOn = on;
+            // Order matters for latency and flashes: the dimmer's values go out first (the strip keeps its last dimmed
+            // colour while the lights are off, so it comes on at that colour), then the MCU is told, and only then the
+            // slow schedule logic runs.
+            if (dimmerLoopRunning) dimmerStep();
+            syncMcu(false);
+            if (on && dimmerActive()) {
+                // CarSettingService reacts to the headlight state with its own brightness: write ours again right after
+                for (long delay : new long[]{80, 200, 400, 800}) {
+                    bgHandler.postDelayed(() -> { lastDisplayWritten = -1; if (dimmerLoopRunning) dimmerStep(); }, delay);
+                }
+            }
             recomputeAndApply(false);
+            onHeadlightEdge(on);
+        } else {
+            syncMcu(false);
         }
+    }
+
+    /** The MCU used to tell CarSettings about every headlight edge, and CarSettings then picked the matching night profile.
+     *  With the MCU out of the picture wRight does that one step itself: at night, and while the dimmer is not driving
+     *  the brightness, put the user's own profile value (headlight / no headlight) on the screen. The four profile keys
+     *  themselves are only read here, never written. */
+    private void onHeadlightEdge(boolean on) {
+        if (dimmerActive() || !lastEffectiveDark) return;       // the dimmer owns it / daytime is applyBrightness()'s job
+        final int value = on ? BrightnessControl.readNightHeadlight(this) : BrightnessControl.readNightNoHeadlight(this);
+        if (value > 0) {
+            // CarSettingService may also react to this edge: give it time, then put the value on top
+            mainHandler.postDelayed(() -> BrightnessControl.applyLive(this, value), BRIGHTNESS_REASSERT_DELAY_MS);
+        }
+    }
+
+    /** Passes the lights state on to the head unit, as measured on it: RPC_SendHeadLightState(false) is what puts the button
+     *  backlight on, (true) puts it out; persist.sys.headlight_enable is what makes the system think the headlights are on
+     *  (true) or off (false). So lights on = RPC(false) + property true, lights off = RPC(true) + property false. Only done
+     *  while the CAN state is the source; the RPC is repeated every 30 s because the MCU forgets it across its sleep. */
+    private void syncMcu(boolean force) {
+        if (!canIsSource()) return;
+        int state = headlightsOn ? 1 : 0;
+        long now = SystemClock.elapsedRealtime();
+        boolean changed = state != mcuSentState;
+        if (!changed && !force && now - lastMcuAssertMs < MCU_REASSERT_MS) return;
+        McuControl.setBacklightLights(headlightsOn);
+        lastMcuAssertMs = now;
+        if (changed || force) BrightnessControl.runRoot("setprop persist.sys.headlight_enable " + headlightsOn);
+        mcuSentState = state;
+    }
+
+    /** the CAN lights state is in charge: switched on, wFabia's state is fresh and valid */
+    private boolean canIsSource() {
+        return Prefs.getBool(this, Prefs.KEY_LIGHTS_FROM_CAN, true) && pipe != null && pipe.isFresh() && canValid;
+    }
+
+    // --- dimmer: display brightness and button backlight follow the car's dimmer wheel ---------------------------
+
+    /** the dimmer drives the outputs: enabled, wFabia's state is fresh, the lights are on and (by default) it is night */
+    private boolean dimmerActive() {
+        if (!Prefs.getBool(this, Prefs.KEY_DIMMER_ENABLED, false)) return false;
+        if (pipe == null || !pipe.isFresh() || !canValid || !canLightsOn) return false;
+        return !Prefs.getBool(this, Prefs.KEY_DIMMER_NIGHT_ONLY, true) || lastEffectiveDark;
+    }
+
+    private final Runnable dimmerRunnable = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                dimmerStep();
+            } catch (Exception e) {
+                Log.e(TAG, "dimmer step failed, will retry", e);
+            } finally {
+                if (dimmerLoopRunning) bgHandler.postDelayed(this, DIMMER_LOOP_MS);
+            }
+        }
+    };
+
+    private void updateDimmerLoop() {
+        boolean want = Prefs.getBool(this, Prefs.KEY_DIMMER_ENABLED, false);
+        if (want && !dimmerLoopRunning) {
+            dimmerLoopRunning = true;
+            bgHandler.post(dimmerRunnable);
+        } else if (!want && dimmerLoopRunning) {
+            dimmerLoopRunning = false;
+            bgHandler.removeCallbacks(dimmerRunnable);
+            if (dimmerWasActive) {
+                dimmerWasActive = false;
+                releaseDimmer();
+            }
+        }
+    }
+
+    private void dimmerStep() {
+        long now = SystemClock.elapsedRealtime();
+        float dtMs = lastDimmerStepMs == 0 ? 100f : Math.min(1000f, now - lastDimmerStepMs);
+        lastDimmerStepMs = now;
+        if (dimmerActive()) {
+            int level = canLevel;
+            float displayMin = Prefs.getInt(this, Prefs.KEY_DIMMER_DISPLAY_MIN, 1) / 255f;
+            float displayMax = Prefs.getInt(this, Prefs.KEY_DIMMER_DISPLAY_MAX, 15) / 255f;
+            float buttonsMin = Prefs.getInt(this, Prefs.KEY_DIMMER_BUTTONS_MIN, 10) / 100f;
+            float buttonsMax = Prefs.getInt(this, Prefs.KEY_DIMMER_BUTTONS_MAX, 100) / 100f;
+
+            // display: interpolated, rounded at the very end so the steps stay one unit wide
+            float shown = displaySmoother.step(DimmerMap.displayBrightness(level, displayMin, displayMax, 1f), dtMs);
+            int display = Math.max(1, Math.round(shown));
+            if (display != lastDisplayWritten || now - lastDisplayAssertMs >= 1500) {
+                // the periodic re-assert covers CarSettingService stomping screen_brightness on its own events
+                if (BrightnessControl.applyLive(this, display) > 0) lastDisplayWritten = display;
+                lastDisplayAssertMs = now;
+            }
+
+            // buttons: the user's colour scaled by the dimmer, hue kept, written only when the colour really changed
+            int base = Prefs.getInt(this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889);
+            float fraction = buttonsSmoother.step(DimmerMap.fraction(level, buttonsMin, buttonsMax, 1f), dtMs);
+            int rgb = DimmerMap.scaleColor(base, fraction);
+            if (rgb != lastButtonsRgb && now - lastButtonsWriteMs >= BUTTONS_MIN_GAP_MS) {
+                BacklightColorControl.apply(rgb, false);
+                lastButtonsRgb = rgb;
+                lastButtonsWriteMs = now;
+            }
+            if (!dimmerWasActive) Log.i(TAG, "dimmer ACTIVE: level " + level);
+            dimmerWasActive = true;
+            if (pipe != null) pipe.reportApplied(display, rgb, true);
+        } else if (dimmerWasActive) {
+            dimmerWasActive = false;
+            releaseDimmer();
+        }
+    }
+
+    /** the dimmer stops driving: the user's own colour back on the buttons, and the display back to what wRight's own
+     *  logic (the day curve) or the user's night profile says */
+    private void releaseDimmer() {
+        Log.i(TAG, "dimmer released");
+        // Lights off with the CAN state in charge: the MCU switches the strip off, and its colour stays the last dimmed one
+        // so it comes back at that colour (not at full) when the lights go on. Otherwise the user's colour goes back.
+        boolean keepDimmedColour = !headlightsOn && canIsSource();
+        if (!keepDimmedColour) {
+            BacklightColorControl.apply(Prefs.getInt(this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889));
+            lastButtonsRgb = -1;
+        }
+        lastDisplayWritten = -1;
+        displaySmoother.clear();
+        buttonsSmoother.clear();
+        recomputeAndApply(true);
+        if (lastEffectiveDark) {
+            int value = headlightsOn ? BrightnessControl.readNightHeadlight(this) : BrightnessControl.readNightNoHeadlight(this);
+            if (value > 0) BrightnessControl.applyLive(this, value);
+        }
+        if (pipe != null) pipe.reportApplied(BrightnessControl.readLive(this, 0),
+                Prefs.getInt(this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889), false);
     }
 
     // --- core schedule logic ----------------------------------------------------------------
@@ -279,6 +475,7 @@ public class WRightService extends Service implements LocationListener,
         boolean scheduleWantsDark = darkModeEnabled && nightWindow;
         boolean lightsForceDark = lightsOverrideEnabled && headlightsOn;
         boolean effectiveDark = scheduleWantsDark || lightsForceDark;
+        lastEffectiveDark = effectiveDark;
 
         // Edge-detect the real (clock-based) day<->night transition - deliberately independent of
         // effectiveDark/Lights Override, which can flip uiMode mid-day and must NOT be mistaken
@@ -332,9 +529,10 @@ public class WRightService extends Service implements LocationListener,
             mainHandler.postDelayed(this::applyBrightness, BRIGHTNESS_REASSERT_DELAY_MS);
         }
 
-        if (fullTick) {
-            applyNightShift(now, sun);
-        }
+        // Every tick, not only every 60 s: NightShiftControl compares with what the system really has and writes only a
+        // difference, so this is cheap and a reset of the keys (wake from suspend, CarSettings, the user) is corrected
+        // within one tick instead of whenever the next full recompute happens to run.
+        applyNightShift(now, sun);
 
         updateNotification(sun, nightWindow);
     }
@@ -505,7 +703,14 @@ public class WRightService extends Service implements LocationListener,
         // reasserted by this service only once, on ACC_ON) - routing it through a full
         // recompute+notification-rebuild on every single RGB tick during a drag was spamming
         // NotificationManager badly enough to hit its rate limit for no benefit.
-        if (Prefs.KEY_BACKLIGHT_COLOR.equals(key)) return;
-        bgHandler.post(() -> recomputeAndApply(true));
+        if (Prefs.KEY_BACKLIGHT_COLOR.equals(key)) {
+            lastButtonsRgb = -1;            // the dimmer re-derives its scaled colour from the new base at its next step
+            return;
+        }
+        bgHandler.post(() -> {
+            updateDimmerLoop();
+            pollHeadlight();
+            recomputeAndApply(true);
+        });
     }
 }

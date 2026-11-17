@@ -333,6 +333,33 @@ public class MainActivity extends AppCompatActivity {
 
         addCard(R.string.card_backlight_title, R.string.card_backlight_subtitle,
                 null, true, R.color.card_backlight, 100f, this::buildBacklightCard);
+
+        addCard(R.string.card_can_lights_title, R.string.card_can_lights_subtitle,
+                Prefs.KEY_LIGHTS_FROM_CAN, true, R.color.card_lights_override, basis, null);
+
+        addCard(R.string.card_dimmer_title, R.string.card_dimmer_subtitle,
+                Prefs.KEY_DIMMER_ENABLED, false, R.color.card_backlight, 100f, faderRow -> {
+                    // the display's night range on this unit is small (0..15), so the display faders use the raw 0..255 scale
+                    addFader(faderRow, getString(R.string.fader_display_min), 1, 60, 1,
+                            Prefs.getInt(this, Prefs.KEY_DIMMER_DISPLAY_MIN, 1), "",
+                            R.color.card_backlight,
+                            v -> Prefs.putInt(this, Prefs.KEY_DIMMER_DISPLAY_MIN, v));
+                    addFader(faderRow, getString(R.string.fader_display_max), 1, 60, 1,
+                            Prefs.getInt(this, Prefs.KEY_DIMMER_DISPLAY_MAX, 15), "",
+                            R.color.card_backlight,
+                            v -> Prefs.putInt(this, Prefs.KEY_DIMMER_DISPLAY_MAX, v));
+                    addFader(faderRow, getString(R.string.fader_buttons_min), 0, 100, 5,
+                            Prefs.getInt(this, Prefs.KEY_DIMMER_BUTTONS_MIN, 10), "%",
+                            R.color.card_backlight,
+                            v -> Prefs.putInt(this, Prefs.KEY_DIMMER_BUTTONS_MIN, v));
+                    addFader(faderRow, getString(R.string.fader_buttons_max), 0, 100, 5,
+                            Prefs.getInt(this, Prefs.KEY_DIMMER_BUTTONS_MAX, 100), "%",
+                            R.color.card_backlight,
+                            v -> Prefs.putInt(this, Prefs.KEY_DIMMER_BUTTONS_MAX, v));
+                });
+
+        addCard(R.string.card_dimmer_night_title, R.string.card_dimmer_night_subtitle,
+                Prefs.KEY_DIMMER_NIGHT_ONLY, true, R.color.card_backlight, basis, null);
     }
 
     private interface FaderBuilder {

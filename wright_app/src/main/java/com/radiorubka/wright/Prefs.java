@@ -25,6 +25,17 @@ public class Prefs {
     public static final String KEY_SUNRISE_OFFSET_MIN = "sunrise_offset_min"; // -30..30
     public static final String KEY_SUNSET_OFFSET_MIN = "sunset_offset_min"; // -30..30
 
+    // Headlights without the ILL wire. The CAN lights state comes from wFabia (VehiclePipeClient). While it is fresh it alone
+    // decides "headlights on", and wRight passes the state on to the MCU (McuControl) and to persist.sys.headlight_enable.
+    public static final String KEY_LIGHTS_FROM_CAN = "lights_from_can";           // default true
+    // The dimmer wheel drives the display brightness and the button backlight while the lights are on.
+    public static final String KEY_DIMMER_ENABLED = "dimmer_enabled";             // default false
+    public static final String KEY_DIMMER_NIGHT_ONLY = "dimmer_night_only";       // default true
+    public static final String KEY_DIMMER_DISPLAY_MIN = "dimmer_display_min";     // 0..255 scale, default 1
+    public static final String KEY_DIMMER_DISPLAY_MAX = "dimmer_display_max";     // 0..255 scale, default 15
+    public static final String KEY_DIMMER_BUTTONS_MIN = "dimmer_buttons_min";     // % of backlight_color, default 10
+    public static final String KEY_DIMMER_BUTTONS_MAX = "dimmer_buttons_max";     // % of backlight_color, default 100
+
     // The user's real night brightness, captured from screen_brightness_night_{headlight,
     // no_headlight} right before we resume daytime priming (i.e. at the real night->day
     // transition) - see WRightService's edge-detection logic. -1 = never captured yet.

@@ -72,6 +72,44 @@ public class BrightnessControl {
         lastAppliedValue255 = clamped;
     }
 
+    /** Writes ONLY the live screen_brightness (WRITE_SETTINGS, no root, no profile keys) - used by the dimmer and by the
+     *  night-profile restore, where the four CarSettingService profile keys hold the user's real preferences and must stay
+     *  untouched. Returns the value written, or -1 if nothing was written. The read-back guard re-asserts the value when
+     *  CarSettingService has stomped it since our last write, which it does on every ui mode / headlight event. */
+    public static int applyLive(Context context, int value255) {
+        int clamped = Math.max(1, Math.min(255, value255));
+        if (!hasPermission(context)) {
+            Log.w(TAG, "applyLive: WRITE_SETTINGS not granted, skipping screen_brightness=" + clamped);
+            return -1;
+        }
+        int current = querySystemIntRaw(context, Settings.System.SCREEN_BRIGHTNESS, -1);
+        if (current == clamped) return clamped;
+        putSystemIntSafely(context, Settings.System.SCREEN_BRIGHTNESS, clamped);
+        // the day curve's cache must not think it already wrote a different value than what is on screen now
+        lastAppliedValue255 = null;
+        return clamped;
+    }
+
+    /** Current live screen_brightness, or def. Readable without any permission. */
+    public static int readLive(Context context, int def) {
+        return querySystemIntRaw(context, Settings.System.SCREEN_BRIGHTNESS, def);
+    }
+
+    /** Runs one shell command through the shared root session (the same persistent `su` the profile writes use).
+     *  Best effort: returns false when root is not available. */
+    public static synchronized boolean runRoot(String command) {
+        if (!ensureRootSession()) return false;
+        try {
+            rootOutput.writeBytes(command + "\n");
+            rootOutput.flush();
+            return true;
+        } catch (IOException e) {
+            Log.w(TAG, "runRoot: root session write failed: " + e);
+            closeRootSession();
+            return false;
+        }
+    }
+
     /** Primes the NIGHT profile keys with the current day-curve value too, without touching the
      *  live screen_brightness - called every tick while it's daytime. This is what kills the
      *  Lights Override flicker: if headlights force dark mode mid-day, CarSettingService reads an

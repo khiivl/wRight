@@ -36,8 +36,14 @@ public class BacklightColorControl {
         }
     }
 
-    /** rgb as a standard 0xRRGGBB int (alpha ignored). */
+    /** rgb as a standard 0xRRGGBB int (alpha ignored). Also remembers it for the next boot. */
     public static void apply(int rgb) {
+        apply(rgb, true);
+    }
+
+    /** persist = false for the dimmer, which changes the colour several times a second: those are not the user's colour
+     *  and must not be written to a persistent property each time. */
+    public static void apply(int rgb, boolean persist) {
         int r = Color.red(rgb);
         int g = Color.green(rgb);
         int b = Color.blue(rgb);
@@ -50,7 +56,7 @@ public class BacklightColorControl {
         } catch (Exception e) {
             Log.w(TAG, "RPC_SendSetQicaideng failed", e);
         }
-        persistLastColor(rgb);
+        if (persist) persistLastColor(rgb);
     }
 
     /** Best-effort only - CarSettings itself writes this for next-boot restore, but an
