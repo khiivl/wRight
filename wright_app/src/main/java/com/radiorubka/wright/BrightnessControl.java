@@ -50,6 +50,11 @@ public class BrightnessControl {
     // cuts out almost all of that traffic instead of re-asserting the same number constantly.
     private static Integer lastAppliedValue255 = null;
     private static Integer lastPrimedNightValue255 = null;
+    /** the last live screen_brightness value this app wrote (or found already in place), -1 none: lets the manual-override
+     *  watch tell its own writes from the user's */
+    private static volatile int lastLiveWritten = -1;
+
+    public static int lastLiveWritten() { return lastLiveWritten; }
 
     /** Covers the plain screen_brightness live write. */
     public static boolean hasPermission(Context context) {
@@ -65,6 +70,7 @@ public class BrightnessControl {
         if (lastAppliedValue255 != null && lastAppliedValue255 == clamped) return;
         if (hasPermission(context)) {
             putSystemIntSafely(context, Settings.System.SCREEN_BRIGHTNESS, clamped);
+            lastLiveWritten = clamped;
         } else {
             Log.w(TAG, "apply: WRITE_SETTINGS not granted, skipping live screen_brightness=" + clamped);
         }
@@ -83,8 +89,9 @@ public class BrightnessControl {
             return -1;
         }
         int current = querySystemIntRaw(context, Settings.System.SCREEN_BRIGHTNESS, -1);
-        if (current == clamped) return clamped;
+        if (current == clamped) { lastLiveWritten = clamped; return clamped; }
         putSystemIntSafely(context, Settings.System.SCREEN_BRIGHTNESS, clamped);
+        lastLiveWritten = clamped;
         // the day curve's cache must not think it already wrote a different value than what is on screen now
         lastAppliedValue255 = null;
         return clamped;
@@ -134,6 +141,12 @@ public class BrightnessControl {
         // This writes the same keys primeNightProfiles() tracks, outside of its cache - drop the
         // cache so the next priming call doesn't wrongly skip a write, thinking the value it
         // computed matches what's stored, when we just overwrote it with something else here.
+        lastPrimedNightValue255 = null;
+    }
+
+    /** Writes ONE night profile key (headlight or no headlight): the night brightness the user set by hand, saved as it is. */
+    public static void setNightProfile(Context context, boolean headlight, int value255) {
+        putSystemIntsRoot(context, headlight ? KEY_NIGHT_HEADLIGHT : KEY_NIGHT_NO_HEADLIGHT, Math.max(1, Math.min(255, value255)));
         lastPrimedNightValue255 = null;
     }
 

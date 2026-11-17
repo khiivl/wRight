@@ -100,6 +100,16 @@ public class WRightService extends Service implements LocationListener,
     // a fresh start never misfires as a transition. See primeOrTransitionNightProfiles().
     private Boolean lastNightWindow = null;
 
+    // applyBrightness() (the day curve) runs once per full recompute, not on every 1.5 s tick: the curve moves by one 0..255 step
+    // every minute or more. It also runs at once when the headlight state changes.
+    private boolean lastBrightnessHeadlights;
+
+    // Manual brightness changes at night: a change of the live screen_brightness that is not ours and not a reaction of
+    // CarSettingService to an event is the user's, and is saved as their night brightness (see watchManualBrightness()).
+    private static final long MANUAL_SETTLE_MS = 5_000;
+    private long manualSettleUntilMs;
+    private int lastSeenLive = -1;
+
     // Edge-detection for the settled (uiMode, headlight) combination CarSettingService actually
     // resolves brightness off - used to react precisely when Lights Override settles into
     // night+headlights-on or day+headlights-off (the two profiles that matter without root, since
@@ -117,6 +127,9 @@ public class WRightService extends Service implements LocationListener,
             switch (action) {
                 case ACTION_ACC_ON:
                     accOn = true;
+                    manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;
+                    lastSeenLive = -1;
+                    captureNightBrightnessIfMissing();
                     restartLocationUpdates();
                     startTickLoop();
                     recomputeAndApply(true);
@@ -174,6 +187,7 @@ public class WRightService extends Service implements LocationListener,
             try {
                 boolean fullTick = SystemClock.elapsedRealtime() - lastFullRecompute >= FULL_RECOMPUTE_INTERVAL_MS;
                 pollHeadlight();                // also repeats the MCU state every 30 s
+                watchManualBrightness();
                 recomputeAndApply(fullTick);
                 if (fullTick) lastFullRecompute = SystemClock.elapsedRealtime();
             } catch (Exception e) {
@@ -208,6 +222,8 @@ public class WRightService extends Service implements LocationListener,
         filter.addAction(Intent.ACTION_TIMEZONE_CHANGED);
         registerReceiver(receiver, filter);
 
+        // before anything can write the night profile keys: what is there now is the user's own
+        captureNightBrightnessIfMissing();
         restartLocationUpdates();
         startTickLoop();
         recomputeAndApply(true);
@@ -306,6 +322,7 @@ public class WRightService extends Service implements LocationListener,
         if (on != headlightsOn) {
             Log.i(TAG, "headlights " + (on ? "ON" : "OFF") + " (source=" + (canSource ? "can" : "mcu") + " pipe=" + (pipe == null ? "-" : pipe.status()) + ")");
             headlightsOn = on;
+            manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;     // CarSettingService reacts to the edge
             // Order matters for latency and flashes: the dimmer's values go out first (the strip keeps its last dimmed
             // colour while the lights are off, so it comes on at that colour), then the MCU is told, and only then the
             // slow schedule logic runs.
@@ -445,6 +462,7 @@ public class WRightService extends Service implements LocationListener,
      *  logic (the day curve) or the user's night profile says */
     private void releaseDimmer() {
         Log.i(TAG, "dimmer released");
+        manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;
         // Lights off with the CAN state in charge: the MCU switches the strip off, and its colour stays the last dimmed one
         // so it comes back at that colour (not at full) when the lights go on. Otherwise the user's colour goes back.
         // Also kept while the ignition is off: the pipe going stale then is not the lights going off, and the user's full colour
@@ -532,7 +550,9 @@ public class WRightService extends Service implements LocationListener,
         // re-resolved brightness off whatever was last sitting in the table - priming only right
         // before our own setDark() call was still too late in that case. Keeping the table
         // continuously current removes the timing dependency entirely.
-        applyBrightness();
+        boolean brightnessDue = fullTick || headlightsOn != lastBrightnessHeadlights;
+        lastBrightnessHeadlights = headlightsOn;
+        if (brightnessDue) applyBrightness();
 
         // Settled-state edge detection for the Lights-Override-during-day case: CarSettingService
         // resolves brightness off the combination of uiMode and headlight state, and without root
@@ -549,6 +569,7 @@ public class WRightService extends Service implements LocationListener,
         lastNightLightsOnSettled = nightLightsOnSettled;
         lastDayHeadlightsOffSettled = dayHeadlightsOffSettled;
 
+        if (currentlyDark != effectiveDark) manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;   // the uiMode flip re-resolves brightness
         ThemeControl.setDark(this, effectiveDark);
         if (enteringNightLightsOn || enteringDayHeadlightsOff) {
             // Give CarSettingService's resolver time to actually stomp screen_brightness off its
@@ -587,6 +608,45 @@ public class WRightService extends Service implements LocationListener,
         int noHeadlight = BrightnessControl.readNightNoHeadlight(this);
         if (headlight > 0) Prefs.putInt(this, Prefs.KEY_SAVED_NIGHT_HEADLIGHT_BRIGHTNESS, headlight);
         if (noHeadlight > 0) Prefs.putInt(this, Prefs.KEY_SAVED_NIGHT_NO_HEADLIGHT_BRIGHTNESS, noHeadlight);
+    }
+
+    /** The night profile keys only need priming when the headlights override can force the dark theme in the daytime. */
+    private boolean lightsOverrideOn() {
+        return Prefs.getBool(this, Prefs.KEY_LIGHTS_OVERRIDE_ENABLED, false);
+    }
+
+    /** First run (or after the saved values were lost): what the night profile keys hold now is the night brightness the user
+     *  has, so keep it for the restore at sunset. Only fills in what is missing, never overwrites a saved value. */
+    private void captureNightBrightnessIfMissing() {
+        if (Prefs.getInt(this, Prefs.KEY_SAVED_NIGHT_HEADLIGHT_BRIGHTNESS, -1) <= 0) {
+            int v = BrightnessControl.readNightHeadlight(this);
+            if (v > 0) Prefs.putInt(this, Prefs.KEY_SAVED_NIGHT_HEADLIGHT_BRIGHTNESS, v);
+        }
+        if (Prefs.getInt(this, Prefs.KEY_SAVED_NIGHT_NO_HEADLIGHT_BRIGHTNESS, -1) <= 0) {
+            int v = BrightnessControl.readNightNoHeadlight(this);
+            if (v > 0) Prefs.putInt(this, Prefs.KEY_SAVED_NIGHT_NO_HEADLIGHT_BRIGHTNESS, v);
+        }
+    }
+
+    /** At night, with the CAN dimmer not driving the screen: when the live brightness changes and it was not our write and not
+     *  a reaction to a headlight edge / uiMode flip / wake (those open a settle window), the user moved it. Save it as their
+     *  night brightness for the current headlight state, so the restore at sunset and the headlight-edge handler use it.
+     *  With the dimmer driving, the value is the wheel's, never the user's: nothing is saved. */
+    private void watchManualBrightness() {
+        int live = BrightnessControl.readLive(this, -1);
+        long now = SystemClock.elapsedRealtime();
+        boolean night = Boolean.TRUE.equals(lastNightWindow);
+        if (live <= 0 || !accOn || !night || dimmerActive() || dimmerWasActive || now < manualSettleUntilMs
+                || lastSeenLive <= 0) {
+            lastSeenLive = live;
+            return;
+        }
+        if (live == lastSeenLive) return;
+        lastSeenLive = live;
+        if (live == BrightnessControl.lastLiveWritten()) return;
+        Log.i(TAG, "manual night brightness " + live + " (headlights " + (headlightsOn ? "on" : "off") + ") saved");
+        Prefs.putInt(this, headlightsOn ? Prefs.KEY_SAVED_NIGHT_HEADLIGHT_BRIGHTNESS : Prefs.KEY_SAVED_NIGHT_NO_HEADLIGHT_BRIGHTNESS, live);
+        BrightnessControl.setNightProfile(this, headlightsOn, live);
     }
 
     private void applyNightShift(long now, SunCalculator.SunTimes sun) {
@@ -637,7 +697,7 @@ public class WRightService extends Service implements LocationListener,
             // matches what's actually on screen right now, not stale night data.
             if (isDaytime) {
                 int current = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS, -1);
-                if (current > 0) BrightnessControl.primeNightProfiles(this, current);
+                if (current > 0 && lightsOverrideOn()) BrightnessControl.primeNightProfiles(this, current);
             }
             Status.putInt(this, Status.KEY_BRIGHTNESS_PCT, STATUS_BRIGHTNESS_DISABLED);
             return;
@@ -663,7 +723,7 @@ public class WRightService extends Service implements LocationListener,
 
         int value255 = Math.round((float) (pct / 100.0 * 255.0));
         BrightnessControl.apply(this, value255);
-        BrightnessControl.primeNightProfiles(this, value255);
+        if (lightsOverrideOn()) BrightnessControl.primeNightProfiles(this, value255);
         Status.putInt(this, Status.KEY_BRIGHTNESS_PCT, (int) Math.round(pct));
     }
 
