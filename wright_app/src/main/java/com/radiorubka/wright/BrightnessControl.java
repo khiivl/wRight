@@ -102,6 +102,12 @@ public class BrightnessControl {
         return querySystemIntRaw(context, Settings.System.SCREEN_BRIGHTNESS, def);
     }
 
+    /** Closes the shared root session (ACC_OFF: the head unit goes to sleep); the next write opens a new one. */
+    public static synchronized void shutdown() {
+        closeRootSession();
+        rootUnavailableLogged = false;
+    }
+
     /** Runs one shell command through the shared root session (the same persistent `su` the profile writes use).
      *  Best effort: returns false when root is not available. */
     public static synchronized boolean runRoot(String command) {

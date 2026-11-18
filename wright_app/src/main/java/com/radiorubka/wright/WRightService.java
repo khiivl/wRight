@@ -110,6 +110,9 @@ public class WRightService extends Service implements LocationListener,
     private static final long MANUAL_SETTLE_MS = 5_000;
     private long manualSettleUntilMs;
     private int lastSeenLive = -1;
+    /** after ACC_ON the pipe needs a moment (wFabia opens the adapter again): the last lights state holds until it is fresh */
+    private static final long WAKE_HOLD_MS = 10_000;
+    private long wakeHoldUntilMs;
     /** the user set the brightness by hand in the daytime: the day curve stays off until the next wake (ACC_ON) or sunset */
     private volatile boolean manualDayOverride;
 
@@ -130,6 +133,7 @@ public class WRightService extends Service implements LocationListener,
             switch (action) {
                 case ACTION_ACC_ON:
                     accOn = true;
+                    wakeHoldUntilMs = SystemClock.elapsedRealtime() + WAKE_HOLD_MS;
                     manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;
                     lastSeenLive = -1;
                     manualDayOverride = false;
@@ -154,6 +158,9 @@ public class WRightService extends Service implements LocationListener,
                     syncMcu(true);
                     dimmerWasActive = false;
                     lastButtonsRgb = -1;
+                    // the vehicle pipe and the dimmer start again; until wFabia's state is fresh the last known lights state holds
+                    if (pipe != null) pipe.start();
+                    updateDimmerLoop();
                     // Belt and suspenders: if the user poked around in CarSettings and
                     // re-enabled its own auto-dark-mode logic, put it back to sleep on every wake
                     // rather than only once at service startup.
@@ -169,13 +176,22 @@ public class WRightService extends Service implements LocationListener,
                     }
                     TimeSource.onAccOff(WRightService.this);
                     stopTickLoop();
+                    // ACC_OFF is the signal to shut everything down: the head unit goes into deep sleep. The dimmer and the
+                    // vehicle pipe stop (the last dimmed colour and the lights state are kept for the wake), pending delayed work
+                    // is dropped and the root shell is closed. Nothing runs until ACC_ON.
+                    dimmerLoopRunning = false;
+                    bgHandler.removeCallbacks(dimmerRunnable);
+                    mainHandler.removeCallbacksAndMessages(null);
+                    if (pipe != null) pipe.stop();
+                    canValid = false;
+                    BrightnessControl.shutdown();
                     try {
                         locationManager.removeUpdates(WRightService.this);
                     } catch (SecurityException ignored) {}
                     break;
                 case Intent.ACTION_TIME_CHANGED:
                 case Intent.ACTION_TIMEZONE_CHANGED:
-                    recomputeAndApply(true);
+                    if (accOn) recomputeAndApply(true);
                     break;
             }
         }
@@ -321,7 +337,9 @@ public class WRightService extends Service implements LocationListener,
         boolean canSource = canIsSource();
         boolean canOn = canSource && canLightsOn;
         // while the CAN state is fresh it alone decides; otherwise the MCU's own state (the ILL wire) is the fallback
-        boolean on = canSource ? canOn : SysProp.getBoolean(PROP_HEADLIGHT_STATE, false);
+        boolean holdForWake = !canSource && SystemClock.elapsedRealtime() < wakeHoldUntilMs
+                && Prefs.getBool(this, Prefs.KEY_LIGHTS_FROM_CAN, true) && pipe != null;
+        boolean on = canSource ? canOn : holdForWake ? headlightsOn : SysProp.getBoolean(PROP_HEADLIGHT_STATE, false);
         Status.putBool(this, Status.KEY_HEADLIGHTS_ON, on);
         if (on != headlightsOn) {
             Log.i(TAG, "headlights " + (on ? "ON" : "OFF") + " (source=" + (canSource ? "can" : "mcu") + " pipe=" + (pipe == null ? "-" : pipe.status()) + ")");
@@ -402,7 +420,7 @@ public class WRightService extends Service implements LocationListener,
     };
 
     private void updateDimmerLoop() {
-        boolean want = Prefs.getBool(this, Prefs.KEY_DIMMER_ENABLED, false);
+        boolean want = Prefs.getBool(this, Prefs.KEY_DIMMER_ENABLED, false) && accOn;
         if (want && !dimmerLoopRunning) {
             dimmerLoopRunning = true;
             bgHandler.post(dimmerRunnable);
@@ -502,6 +520,7 @@ public class WRightService extends Service implements LocationListener,
     }
 
     private void doRecomputeAndApply(boolean fullTick) {
+        if (!accOn) return;     // asleep: nothing is computed or written until ACC_ON
         if (!hasFix) {
             // The single most likely reason "nothing reacts at all" looks identical to a broken
             // broadcast/tick loop: every recompute bails out right here until the first GPS fix
@@ -816,6 +835,7 @@ public class WRightService extends Service implements LocationListener,
             lastButtonsRgb = -1;            // the dimmer re-derives its scaled colour from the new base at its next step
             return;
         }
+        if (!accOn) return;     // asleep: the setting is picked up at ACC_ON
         bgHandler.post(() -> {
             updateDimmerLoop();
             pollHeadlight();
