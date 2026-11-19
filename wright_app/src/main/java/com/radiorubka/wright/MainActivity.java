@@ -344,6 +344,10 @@ public class MainActivity extends AppCompatActivity {
         addCard(R.string.card_can_lights_title, R.string.card_can_lights_subtitle,
                 Prefs.KEY_LIGHTS_FROM_CAN, true, R.color.card_lights_override, basis, null);
 
+        // next to "Headlights from CAN": the two share a row in landscape
+        addCard(R.string.card_dimmer_night_title, R.string.card_dimmer_night_subtitle,
+                Prefs.KEY_DIMMER_NIGHT_ONLY, true, R.color.card_backlight, basis, null);
+
         addCard(R.string.card_dimmer_title, R.string.card_dimmer_subtitle,
                 Prefs.KEY_DIMMER_ENABLED, false, R.color.card_backlight, 100f, faderRow -> {
                     // the display's night range on this unit is small (0..15), so the display faders use the raw 0..255 scale
@@ -364,9 +368,6 @@ public class MainActivity extends AppCompatActivity {
                             R.color.card_backlight,
                             v -> Prefs.putInt(this, Prefs.KEY_DIMMER_BUTTONS_MAX, v));
                 });
-
-        addCard(R.string.card_dimmer_night_title, R.string.card_dimmer_night_subtitle,
-                Prefs.KEY_DIMMER_NIGHT_ONLY, true, R.color.card_backlight, basis, null);
     }
 
     private interface FaderBuilder {

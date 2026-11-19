@@ -30,7 +30,7 @@
     <string name="card_dimmer_title">Dimmer</string>
     <string name="card_dimmer_subtitle">Display and button backlight follow the car\'s dimmer wheel while the lights are on</string>
     <string name="card_dimmer_night_title">Dimmer only at night</string>
-    <string name="card_dimmer_night_subtitle">By day with the lights on, wRight\'s own logic stays in charge</string>
+    <string name="card_dimmer_night_subtitle">By day the display keeps wRight\'s own logic with the lights on. The buttons always follow the dimmer</string>
     <string name="fader_display_min">Display min</string>
     <string name="fader_display_max">Display max</string>
     <string name="fader_buttons_min">Buttons min</string>
