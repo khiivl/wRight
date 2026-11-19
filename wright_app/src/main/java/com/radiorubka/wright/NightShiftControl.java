@@ -34,6 +34,10 @@ public class NightShiftControl {
     private static final int LEVEL_WARMEST = 1;
     private static final int LEVEL_NEUTRAL = 64;
 
+    // transaction codes of android.hardware.display.IColorDisplayManager on this ROM (read from its framework.jar)
+    private static final int CODE_SET_ACTIVATED = 7, CODE_SET_TEMPERATURE = 9;
+    private static volatile boolean resync = true;
+
     public static boolean hasPermission(Context context) {
         return context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS)
                 == PackageManager.PERMISSION_GRANTED;
@@ -48,7 +52,6 @@ public class NightShiftControl {
      *  that happens twice a day, every day, for no benefit over just parking the temperature at
      *  neutral, which looks identical and causes no transform re-init. */
     public static void apply(Context context, boolean featureEnabled, float intensity01) {
-        if (!hasPermission(context)) return;
         float clamped = Math.max(0f, Math.min(1f, intensity01));
         int level = Math.round(LEVEL_NEUTRAL - clamped * (LEVEL_NEUTRAL - LEVEL_WARMEST));
         level = Math.max(LEVEL_WARMEST, Math.min(LEVEL_NEUTRAL, level)); // defensive: never send outside the confirmed valid 1-64 domain
@@ -56,18 +59,36 @@ public class NightShiftControl {
         // corrects only a difference. A one-shot write that nobody ever checks is how Night Shift ended up "not always
         // working": anything that resets these keys after wRight's write (a wake from suspend, CarSettings, the user in
         // the system UI) stayed wrong until the next unrelated write. The log line says what had to be corrected.
+        // The values go through the colour service's own API (setNightDisplayColorTemperature / setNightDisplayActivated),
+        // the way the system's slider does it: a bare write of the Settings.Secure keys is stored but the running service
+        // does not re-apply it, so the screen kept its old colour. The service writes the keys itself, so reading them back
+        // stays the way to see what is applied. After a start or a wake (resync) both are sent once whatever the keys say.
+        boolean force = resync;
+        resync = false;
         int wantActivated = featureEnabled ? 1 : 0;
         int haveActivated = getIntSafely(context, KEY_ACTIVATED, -1);
         int haveLevel = getIntSafely(context, KEY_TEMPERATURE, -1);
-        if (haveActivated != wantActivated) {
-            Log.i(TAG, "reconcile: night_display_activated " + haveActivated + " -> " + wantActivated);
-            putIntSafely(context, KEY_ACTIVATED, wantActivated);
-        }
-        if (haveLevel != level) {
+        if (force || haveLevel != level) {
             Log.i(TAG, "reconcile: night_display_color_temperature " + haveLevel + " -> " + level
-                    + " (featureEnabled=" + featureEnabled + " intensity=" + clamped + ")");
-            putIntSafely(context, KEY_TEMPERATURE, level);
+                    + " (featureEnabled=" + featureEnabled + " intensity=" + clamped + (force ? ", resync" : "") + ")");
+            callService(context, CODE_SET_TEMPERATURE, level, KEY_TEMPERATURE);
         }
+        if (force || haveActivated != wantActivated) {
+            Log.i(TAG, "reconcile: night_display_activated " + haveActivated + " -> " + wantActivated + (force ? " (resync)" : ""));
+            callService(context, CODE_SET_ACTIVATED, wantActivated, KEY_ACTIVATED);
+        }
+    }
+
+    /** the next apply() sends everything again (service start, wake from sleep) */
+    public static void invalidate() {
+        resync = true;
+    }
+
+    /** IColorDisplayManager transaction through the root shell (the caller needs CONTROL_DISPLAY_COLOR_TRANSFORMS, which
+     *  root has); without root, the old direct write of the setting as a fallback */
+    private static void callService(Context context, int code, int value, String fallbackKey) {
+        if (BrightnessControl.runRoot("service call color_display " + code + " i32 " + value)) return;
+        if (hasPermission(context)) putIntSafely(context, fallbackKey, value);
     }
 
     private static int getIntSafely(Context context, String key, int def) {

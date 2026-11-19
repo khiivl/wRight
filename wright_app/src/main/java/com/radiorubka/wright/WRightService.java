@@ -161,6 +161,7 @@ public class WRightService extends Service implements LocationListener,
                     // The MCU forgets what we told it across its own sleep cycle, and CarSettings sends its stored
                     // headlight_enable again at every start: say it again.
                     mcuSentState = -1;
+                    NightShiftControl.invalidate();     // the colour service may have lost its state across the sleep
                     syncMcu(true);
                     dimmerWasActive = false;
                     buttonsWasActive = false;
