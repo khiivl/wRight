@@ -48,7 +48,8 @@ public class WRightService extends Service implements LocationListener,
     private static final long LOCATION_MIN_TIME_MS = 0;       // every fix the receiver produces, as fast as it produces them
     private static final long LOCATION_RETRY_MS = 15_000, POSITION_EVERY_MS = 60_000;
     private boolean fixSinceWake;
-    private long lastPositionMs, lastSentFixNanos, fixCountSince;
+    private static final long GPS_LIVE_MS = 10_000;
+    private long lastPositionMs, lastSentFixNanos, fixCountSince, lastFreshFixMs;
     private final java.util.Map<String, Integer> fixCounts = new java.util.HashMap<>();
     private final SpeedTracker speedTracker = new SpeedTracker();
     private static final long BRIGHTNESS_REASSERT_DELAY_MS = 500;
@@ -213,6 +214,9 @@ public class WRightService extends Service implements LocationListener,
             // the schedule down with it.
             try {
                 boolean fullTick = SystemClock.elapsedRealtime() - lastFullRecompute >= FULL_RECOMPUTE_INTERVAL_MS;
+                // "has fix" on the status panel means a live fix: a real fix in the last 10 s, not the position kept from before the sleep
+                Status.putBool(WRightService.this, Status.KEY_HAS_FIX,
+                        fixSinceWake && SystemClock.elapsedRealtime() - lastFreshFixMs <= GPS_LIVE_MS);
                 pollHeadlight();                // also repeats the MCU state every 30 s
                 watchManualBrightness();
                 recomputeAndApply(fullTick);
@@ -356,9 +360,10 @@ public class WRightService extends Service implements LocationListener,
         if ("network".equals(location.getProvider())) return;
         long now = SystemClock.elapsedRealtime();
         if (fresh) {
+            lastFreshFixMs = now;
             if (!fixSinceWake) {
                 fixSinceWake = true;
-                lastPositionMs = 0;           // the first fix after a wake is always processed (position and the GPS time)
+                lastPositionMs = 0;          // the first fix after a wake is always processed (position and the GPS time)
                 bgHandler.removeCallbacks(locationRetry);
                 Log.i(TAG, "first GPS fix since the wake (" + location.getProvider() + ")");
             }
@@ -385,7 +390,6 @@ public class WRightService extends Service implements LocationListener,
         Prefs.putLong(this, Prefs.KEY_LAST_FIX_TIME, System.currentTimeMillis());
         Status.putDouble(this, Status.KEY_LAT, lastLat);
         Status.putDouble(this, Status.KEY_LON, lastLon);
-        Status.putBool(this, Status.KEY_HAS_FIX, true);
         recomputeAndApply(true);
     }
 

@@ -48,7 +48,7 @@
     <string name="status_sunset">Sunset time:</string>
     <string name="status_manual">Manual (until next wake)</string>
     <string name="status_brightness">Current brightness level:</string>
-    <string name="status_no_fix">No fix yet</string>
+    <string name="status_no_fix">No GPS fix</string>
     <string name="status_on">ON</string>
     <string name="status_off">OFF</string>
     <string name="status_disabled">Disabled</string>
