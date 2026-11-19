@@ -30,7 +30,7 @@ public class VehiclePipeClient {
     private static final String CB_DESCRIPTOR = "de.wfabia.IVehiclePipeCallback";
     private static final int VERSION = 1;
     private static final int T_HELLO = IBinder.FIRST_CALL_TRANSACTION,
-            T_REQUEST_STATE = T_HELLO + 1, T_APPLIED = T_HELLO + 2, T_BYE = T_HELLO + 3;
+            T_REQUEST_STATE = T_HELLO + 1, T_APPLIED = T_HELLO + 2, T_BYE = T_HELLO + 3, T_LOCATION = T_HELLO + 4;
     private static final int CB_STATE = IBinder.FIRST_CALL_TRANSACTION;
     private static final int R_OK = 0, R_REJECTED = 1, R_MODULE_OFF = 2;
 
@@ -222,6 +222,26 @@ public class VehiclePipeClient {
             d.writeInt(buttonsRgb);
             d.writeInt(active ? 1 : 0);
             s.transact(T_APPLIED, d, null, IBinder.FLAG_ONEWAY);
+        } catch (RemoteException ignored) {
+            // the next state or rebind will sort it out
+        } finally {
+            d.recycle();
+        }
+    }
+
+    /** a location fix for wFabia's speed row (wRight is the only app that asks for fixes). Oneway, dropped when not connected. */
+    public void sendLocation(boolean hasSpeed, float speedMs, float accuracy, String provider) {
+        IBinder s = service;
+        if (s == null) return;
+        Parcel d = Parcel.obtain();
+        try {
+            d.writeInterfaceToken(DESCRIPTOR);
+            d.writeInt(VERSION);
+            d.writeInt(hasSpeed ? 1 : 0);
+            d.writeFloat(speedMs);
+            d.writeFloat(accuracy);
+            d.writeString(provider);
+            s.transact(T_LOCATION, d, null, IBinder.FLAG_ONEWAY);
         } catch (RemoteException ignored) {
             // the next state or rebind will sort it out
         } finally {

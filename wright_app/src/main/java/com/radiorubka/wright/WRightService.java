@@ -45,9 +45,11 @@ public class WRightService extends Service implements LocationListener,
 
     private static final long TICK_INTERVAL_MS = 1_500; // headlight responsiveness
     private static final long FULL_RECOMPUTE_INTERVAL_MS = 60_000; // brightness/night-shift smoothness
-    private static final long LOCATION_MIN_TIME_MS = 10 * 60_000;
-    private static final long LOCATION_RETRY_MS = 15_000;
+    private static final long LOCATION_MIN_TIME_MS = 1_000;
+    private static final long LOCATION_RETRY_MS = 15_000, POSITION_EVERY_MS = 60_000;
     private boolean fixSinceWake;
+    private long lastLocationSentMs, lastPositionMs;
+    private final SpeedTracker speedTracker = new SpeedTracker();
     private static final long BRIGHTNESS_REASSERT_DELAY_MS = 500;
     // Grace period after sunset before Night Shift's warmth starts ramping, so dark mode visibly
     // switches first instead of both changes landing in the same instant.
@@ -289,26 +291,34 @@ public class WRightService extends Service implements LocationListener,
 
     // --- location -----------------------------------------------------------------------
 
-    /** Registers for GPS fixes. After a wake (and at start) it asks for a fix every second and registers again every 15 s until
-     *  one arrives: with the 10 minute interval, or a registration made while the receiver was still waking up, the first fix
-     *  after a sleep could take many minutes or never come. Once a fix has arrived the interval relaxes to 10 minutes. */
+    /** wRight is the only app that asks the head unit's location service for fixes: the position feeds the sun times, the speed
+     *  goes to wFabia over the vehicle pipe for the cluster's speed row. It asks every second, always (the speed needs the rate),
+     *  and after a wake it registers again every 15 s until a fix arrives: a registration made while the receiver was still waking
+     *  up could otherwise stay silent for many minutes or forever. */
     private void restartLocationUpdates() {
         fixSinceWake = false;
         bgHandler.removeCallbacks(locationRetry);
-        registerLocation(1_000L);
+        registerLocation();
         bgHandler.postDelayed(locationRetry, LOCATION_RETRY_MS);
     }
 
-    private void registerLocation(long minTimeMs) {
+    /** every provider the head unit offers (they differ in which one carries the GPS), as wFabia used to do itself */
+    private void registerLocation() {
         try {
             locationManager.removeUpdates(this);
+            speedTracker.clear();
             Location last = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
             if (last != null) onLocationChanged(last, false);
-            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, minTimeMs, 0f, this, bgHandler.getLooper());
+            for (String name : locationManager.getAllProviders()) {
+                if ("network".equals(name)) continue;
+                try {
+                    locationManager.requestLocationUpdates(name, LOCATION_MIN_TIME_MS, 0f, this, bgHandler.getLooper());
+                } catch (IllegalArgumentException e) {
+                    Log.w(TAG, "location provider " + name + " unavailable: " + e);
+                }
+            }
         } catch (SecurityException e) {
             Log.w(TAG, "No location permission yet", e);
-        } catch (IllegalArgumentException e) {
-            Log.w(TAG, "GPS provider unavailable", e);
         }
     }
 
@@ -317,7 +327,7 @@ public class WRightService extends Service implements LocationListener,
         public void run() {
             if (!accOn || fixSinceWake) return;
             Log.i(TAG, "no GPS fix since the wake yet, registering again");
-            registerLocation(1_000L);
+            registerLocation();
             bgHandler.postDelayed(this, LOCATION_RETRY_MS);
         }
     };
@@ -329,12 +339,25 @@ public class WRightService extends Service implements LocationListener,
 
     /** fresh = a real fix from the receiver (not the cached last known location) */
     private void onLocationChanged(Location location, boolean fresh) {
-        if (fresh && !fixSinceWake) {
-            fixSinceWake = true;
-            bgHandler.removeCallbacks(locationRetry);
-            Log.i(TAG, "first GPS fix since the wake, interval back to " + (LOCATION_MIN_TIME_MS / 60_000) + " min");
-            bgHandler.post(() -> registerLocation(LOCATION_MIN_TIME_MS));
+        if ("network".equals(location.getProvider())) return;
+        long now = SystemClock.elapsedRealtime();
+        if (fresh) {
+            if (!fixSinceWake) {
+                fixSinceWake = true;
+                lastPositionMs = 0;           // the first fix after a wake is always processed (position and the GPS time)
+                bgHandler.removeCallbacks(locationRetry);
+                Log.i(TAG, "first GPS fix since the wake (" + location.getProvider() + ")");
+            }
+            // the speed row of wFabia's cluster display; passive and gps deliver the same fix, so at most about 3 per second
+            SpeedTracker.Sample sample = speedTracker.onLocation(location);
+            if (pipe != null && now - lastLocationSentMs >= 300) {
+                lastLocationSentMs = now;
+                pipe.sendLocation(sample.hasSpeed, sample.speedMs, sample.accuracy, sample.provider);
+            }
         }
+        // position, time and the schedule do not need every second: the first fix, or once a minute
+        if (hasFix && now - lastPositionMs < POSITION_EVERY_MS) return;
+        lastPositionMs = now;
         TimeSource.onLocation(location);
         lastLat = location.getLatitude();
         lastLon = location.getLongitude();
