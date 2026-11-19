@@ -45,10 +45,11 @@ public class WRightService extends Service implements LocationListener,
 
     private static final long TICK_INTERVAL_MS = 1_500; // headlight responsiveness
     private static final long FULL_RECOMPUTE_INTERVAL_MS = 60_000; // brightness/night-shift smoothness
-    private static final long LOCATION_MIN_TIME_MS = 1_000;
+    private static final long LOCATION_MIN_TIME_MS = 0;       // every fix the receiver produces, as fast as it produces them
     private static final long LOCATION_RETRY_MS = 15_000, POSITION_EVERY_MS = 60_000;
     private boolean fixSinceWake;
-    private long lastLocationSentMs, lastPositionMs;
+    private long lastPositionMs, lastSentFixNanos, fixCountSince;
+    private final java.util.Map<String, Integer> fixCounts = new java.util.HashMap<>();
     private final SpeedTracker speedTracker = new SpeedTracker();
     private static final long BRIGHTNESS_REASSERT_DELAY_MS = 500;
     // Grace period after sunset before Night Shift's warmth starts ramping, so dark mode visibly
@@ -307,6 +308,7 @@ public class WRightService extends Service implements LocationListener,
         try {
             locationManager.removeUpdates(this);
             speedTracker.clear();
+            lastSentFixNanos = 0;
             Location last = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
             if (last != null) onLocationChanged(last, false);
             for (String name : locationManager.getAllProviders()) {
@@ -319,6 +321,18 @@ public class WRightService extends Service implements LocationListener,
             }
         } catch (SecurityException e) {
             Log.w(TAG, "No location permission yet", e);
+        }
+    }
+
+    /** one log line every 10 s with how many fixes each provider delivered: what rate the receiver really gives */
+    private void countFix(String provider, long now) {
+        String p = provider == null ? "?" : provider;
+        Integer n = fixCounts.get(p);
+        fixCounts.put(p, n == null ? 1 : n + 1);
+        if (now - fixCountSince >= 10_000) {
+            if (fixCountSince != 0) Log.i(TAG, "location fixes in " + (now - fixCountSince) / 1000 + " s: " + fixCounts);
+            fixCounts.clear();
+            fixCountSince = now;
         }
     }
 
@@ -348,11 +362,15 @@ public class WRightService extends Service implements LocationListener,
                 bgHandler.removeCallbacks(locationRetry);
                 Log.i(TAG, "first GPS fix since the wake (" + location.getProvider() + ")");
             }
-            // the speed row of wFabia's cluster display; passive and gps deliver the same fix, so at most about 3 per second
-            SpeedTracker.Sample sample = speedTracker.onLocation(location);
-            if (pipe != null && now - lastLocationSentMs >= 300) {
-                lastLocationSentMs = now;
-                pipe.sendLocation(sample.hasSpeed, sample.speedMs, sample.accuracy, sample.provider);
+            // the speed row of wFabia's cluster display. Sent the moment a fix arrives; passive and gps deliver the same fix
+            // (same timestamp), and a slower provider's older fix must never overwrite a newer speed, so only a fix newer than the
+            // last one sent goes out.
+            long fixNanos = location.getElapsedRealtimeNanos();
+            countFix(location.getProvider(), now);
+            if (fixNanos > lastSentFixNanos) {
+                lastSentFixNanos = fixNanos;
+                SpeedTracker.Sample sample = speedTracker.onLocation(location);
+                if (pipe != null) pipe.sendLocation(sample.hasSpeed, sample.speedMs, sample.accuracy, sample.provider);
             }
         }
         // position, time and the schedule do not need every second: the first fix, or once a minute
