@@ -46,6 +46,8 @@ public class WRightService extends Service implements LocationListener,
     private static final long TICK_INTERVAL_MS = 1_500; // headlight responsiveness
     private static final long FULL_RECOMPUTE_INTERVAL_MS = 60_000; // brightness/night-shift smoothness
     private static final long LOCATION_MIN_TIME_MS = 10 * 60_000;
+    private static final long LOCATION_RETRY_MS = 15_000;
+    private boolean fixSinceWake;
     private static final long BRIGHTNESS_REASSERT_DELAY_MS = 500;
     // Grace period after sunset before Night Shift's warmth starts ramping, so dark mode visibly
     // switches first instead of both changes landing in the same instant.
@@ -81,8 +83,8 @@ public class WRightService extends Service implements LocationListener,
     private boolean lastEffectiveDark;
     private int mcuSentState = -1;              // the lights state last passed to the MCU / the property: -1 none, 0 off, 1 on
     private long lastMcuAssertMs;
-    private boolean dimmerLoopRunning, dimmerWasActive;
-    private long lastDimmerStepMs, lastDisplayAssertMs, lastButtonsWriteMs;
+    private boolean dimmerLoopRunning, dimmerWasActive, buttonsWasActive;   // dimmerWasActive = display, buttonsWasActive = strip
+    private long lastDimmerStepMs, lastButtonsWriteMs;
     private int lastDisplayWritten = -1, lastButtonsRgb = -1;
     /** the last dimmed button colour the dimmer wrote (-1 none). Survives the dimmer's release and an ACC cycle, so the wake
      *  puts the strip back at that colour instead of at the user's full one. Also kept in Prefs for a service restart. */
@@ -157,6 +159,7 @@ public class WRightService extends Service implements LocationListener,
                     mcuSentState = -1;
                     syncMcu(true);
                     dimmerWasActive = false;
+                    buttonsWasActive = false;
                     lastButtonsRgb = -1;
                     // the vehicle pipe and the dimmer start again; until wFabia's state is fresh the last known lights state holds
                     if (pipe != null) pipe.start();
@@ -185,6 +188,7 @@ public class WRightService extends Service implements LocationListener,
                     if (pipe != null) pipe.stop();
                     canValid = false;
                     BrightnessControl.shutdown();
+                    bgHandler.removeCallbacks(locationRetry);
                     try {
                         locationManager.removeUpdates(WRightService.this);
                     } catch (SecurityException ignored) {}
@@ -285,11 +289,22 @@ public class WRightService extends Service implements LocationListener,
 
     // --- location -----------------------------------------------------------------------
 
+    /** Registers for GPS fixes. After a wake (and at start) it asks for a fix every second and registers again every 15 s until
+     *  one arrives: with the 10 minute interval, or a registration made while the receiver was still waking up, the first fix
+     *  after a sleep could take many minutes or never come. Once a fix has arrived the interval relaxes to 10 minutes. */
     private void restartLocationUpdates() {
+        fixSinceWake = false;
+        bgHandler.removeCallbacks(locationRetry);
+        registerLocation(1_000L);
+        bgHandler.postDelayed(locationRetry, LOCATION_RETRY_MS);
+    }
+
+    private void registerLocation(long minTimeMs) {
         try {
+            locationManager.removeUpdates(this);
             Location last = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-            if (last != null) onLocationChanged(last);
-            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, LOCATION_MIN_TIME_MS, 0f, this);
+            if (last != null) onLocationChanged(last, false);
+            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, minTimeMs, 0f, this, bgHandler.getLooper());
         } catch (SecurityException e) {
             Log.w(TAG, "No location permission yet", e);
         } catch (IllegalArgumentException e) {
@@ -297,8 +312,29 @@ public class WRightService extends Service implements LocationListener,
         }
     }
 
+    private final Runnable locationRetry = new Runnable() {
+        @Override
+        public void run() {
+            if (!accOn || fixSinceWake) return;
+            Log.i(TAG, "no GPS fix since the wake yet, registering again");
+            registerLocation(1_000L);
+            bgHandler.postDelayed(this, LOCATION_RETRY_MS);
+        }
+    };
+
     @Override
     public void onLocationChanged(Location location) {
+        onLocationChanged(location, true);
+    }
+
+    /** fresh = a real fix from the receiver (not the cached last known location) */
+    private void onLocationChanged(Location location, boolean fresh) {
+        if (fresh && !fixSinceWake) {
+            fixSinceWake = true;
+            bgHandler.removeCallbacks(locationRetry);
+            Log.i(TAG, "first GPS fix since the wake, interval back to " + (LOCATION_MIN_TIME_MS / 60_000) + " min");
+            bgHandler.post(() -> registerLocation(LOCATION_MIN_TIME_MS));
+        }
         TimeSource.onLocation(location);
         lastLat = location.getLatitude();
         lastLon = location.getLongitude();
@@ -313,7 +349,10 @@ public class WRightService extends Service implements LocationListener,
     }
 
     @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
-    @Override public void onProviderEnabled(String provider) {}
+    @Override public void onProviderEnabled(String provider) {
+        // the receiver came back (wake, the user switched location on): register again
+        if (accOn && LocationManager.GPS_PROVIDER.equals(provider)) bgHandler.post(this::restartLocationUpdates);
+    }
     @Override public void onProviderDisabled(String provider) {}
 
     // --- tick loop ------------------------------------------------------------------------
@@ -401,9 +440,14 @@ public class WRightService extends Service implements LocationListener,
 
     /** the dimmer drives the outputs: enabled, wFabia's state is fresh, the lights are on and (by default) it is night */
     private boolean dimmerActive() {
+        return buttonsActive() && (!Prefs.getBool(this, Prefs.KEY_DIMMER_NIGHT_ONLY, true) || lastEffectiveDark);
+    }
+
+    /** the wheel drives the button backlight: enabled, wFabia's state is fresh and the lights are on, day or night
+     *  (the "dimmer only at night" option applies to the display only) */
+    private boolean buttonsActive() {
         if (!Prefs.getBool(this, Prefs.KEY_DIMMER_ENABLED, false)) return false;
-        if (pipe == null || !pipe.isFresh() || !canValid || !canLightsOn) return false;
-        return !Prefs.getBool(this, Prefs.KEY_DIMMER_NIGHT_ONLY, true) || lastEffectiveDark;
+        return pipe != null && pipe.isFresh() && canValid && canLightsOn;
     }
 
     private final Runnable dimmerRunnable = new Runnable() {
@@ -429,7 +473,11 @@ public class WRightService extends Service implements LocationListener,
             bgHandler.removeCallbacks(dimmerRunnable);
             if (dimmerWasActive) {
                 dimmerWasActive = false;
-                releaseDimmer();
+                releaseDisplay();
+            }
+            if (buttonsWasActive) {
+                buttonsWasActive = false;
+                releaseButtons();
             }
         }
     }
@@ -438,39 +486,47 @@ public class WRightService extends Service implements LocationListener,
         long now = SystemClock.elapsedRealtime();
         float dtMs = lastDimmerStepMs == 0 ? 100f : Math.min(1000f, now - lastDimmerStepMs);
         lastDimmerStepMs = now;
-        if (dimmerActive()) {
-            int level = canLevel;
+        boolean buttons = buttonsActive();
+        boolean display = buttons && dimmerActive();
+        int level = canLevel;
+        int shownDisplay = -1, shownRgb = -1;
+
+        if (display) {
             float displayMin = Prefs.getInt(this, Prefs.KEY_DIMMER_DISPLAY_MIN, 1) / 255f;
             float displayMax = Prefs.getInt(this, Prefs.KEY_DIMMER_DISPLAY_MAX, 15) / 255f;
-            float buttonsMin = Prefs.getInt(this, Prefs.KEY_DIMMER_BUTTONS_MIN, 10) / 100f;
-            float buttonsMax = Prefs.getInt(this, Prefs.KEY_DIMMER_BUTTONS_MAX, 100) / 100f;
-
-            // display: interpolated, rounded at the very end so the steps stay one unit wide
+            // interpolated, rounded at the very end so the steps stay one unit wide
             float shown = displaySmoother.step(DimmerMap.displayBrightness(level, displayMin, displayMax, 1f), dtMs);
-            int display = Math.max(1, Math.round(shown));
-            if (display != lastDisplayWritten || now - lastDisplayAssertMs >= 1500) {
-                // the periodic re-assert covers CarSettingService stomping screen_brightness on its own events
-                if (BrightnessControl.applyLive(this, display) > 0) lastDisplayWritten = display;
-                lastDisplayAssertMs = now;
-            }
-
-            // buttons: the user's colour scaled by the dimmer, hue kept, written only when the colour really changed
-            int base = Prefs.getInt(this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889);
-            float fraction = buttonsSmoother.step(DimmerMap.fraction(level, buttonsMin, buttonsMax, 1f), dtMs);
-            int rgb = DimmerMap.scaleColor(base, fraction);
-            if (rgb != lastButtonsRgb && now - lastButtonsWriteMs >= BUTTONS_MIN_GAP_MS) {
-                BacklightColorControl.apply(rgb, false);
-                lastButtonsRgb = rgb;
-                lastDimmedRgb = rgb;
-                lastButtonsWriteMs = now;
-            }
+            shownDisplay = Math.max(1, Math.round(shown));
+            // checked against the live value on every step (a cheap read): whoever else writes screen_brightness
+            // (CarSettingService on its events, the day curve) is corrected within one step instead of pulsing the screen
+            if (BrightnessControl.applyLive(this, shownDisplay) > 0) lastDisplayWritten = shownDisplay;
             if (!dimmerWasActive) Log.i(TAG, "dimmer ACTIVE: level " + level);
             dimmerWasActive = true;
-            if (pipe != null) pipe.reportApplied(display, rgb, true);
         } else if (dimmerWasActive) {
             dimmerWasActive = false;
-            releaseDimmer();
+            releaseDisplay();
         }
+
+        if (buttons) {
+            float buttonsMin = Prefs.getInt(this, Prefs.KEY_DIMMER_BUTTONS_MIN, 10) / 100f;
+            float buttonsMax = Prefs.getInt(this, Prefs.KEY_DIMMER_BUTTONS_MAX, 100) / 100f;
+            // the user's colour scaled by the dimmer, hue kept, written only when the colour really changed
+            int base = Prefs.getInt(this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889);
+            float fraction = buttonsSmoother.step(DimmerMap.fraction(level, buttonsMin, buttonsMax, 1f), dtMs);
+            shownRgb = DimmerMap.scaleColor(base, fraction);
+            if (shownRgb != lastButtonsRgb && now - lastButtonsWriteMs >= BUTTONS_MIN_GAP_MS) {
+                BacklightColorControl.apply(shownRgb, false);
+                lastButtonsRgb = shownRgb;
+                lastDimmedRgb = shownRgb;
+                lastButtonsWriteMs = now;
+            }
+            buttonsWasActive = true;
+        } else if (buttonsWasActive) {
+            buttonsWasActive = false;
+            releaseButtons();
+        }
+
+        if (pipe != null && buttons) pipe.reportApplied(display ? shownDisplay : BrightnessControl.readLive(this, 0), shownRgb, display);
     }
 
     /** the colour for the strip on ACC_ON: the last dimmed one if the dimmer is on and the lights were on at ACC_OFF, else -1 */
@@ -482,9 +538,8 @@ public class WRightService extends Service implements LocationListener,
 
     /** the dimmer stops driving: the user's own colour back on the buttons, and the display back to what wRight's own
      *  logic (the day curve) or the user's night profile says */
-    private void releaseDimmer() {
-        Log.i(TAG, "dimmer released");
-        manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;
+    private void releaseButtons() {
+        Log.i(TAG, "dimmer released (buttons)");
         // Lights off with the CAN state in charge: the MCU switches the strip off, and its colour stays the last dimmed one
         // so it comes back at that colour (not at full) when the lights go on. Otherwise the user's colour goes back.
         // Also kept while the ignition is off: the pipe going stale then is not the lights going off, and the user's full colour
@@ -494,9 +549,15 @@ public class WRightService extends Service implements LocationListener,
             BacklightColorControl.apply(Prefs.getInt(this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889));
             lastButtonsRgb = -1;
         }
+        buttonsSmoother.clear();
+    }
+
+    /** the display stops following the wheel: back to wRight's own logic (the day curve) or the user's night profile */
+    private void releaseDisplay() {
+        Log.i(TAG, "dimmer released (display)");
+        manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;
         lastDisplayWritten = -1;
         displaySmoother.clear();
-        buttonsSmoother.clear();
         recomputeAndApply(true);
         if (lastEffectiveDark) {
             int value = headlightsOn ? BrightnessControl.readNightHeadlight(this) : BrightnessControl.readNightNoHeadlight(this);
@@ -762,7 +823,9 @@ public class WRightService extends Service implements LocationListener,
         double pct = minPct + curve * (maxPct - minPct);
 
         int value255 = Math.round((float) (pct / 100.0 * 255.0));
-        BrightnessControl.apply(this, value255);
+        // the dimmer owns screen_brightness while it drives the display (lights override in the daytime): writing the curve
+        // value here is what made the screen pulse, the dimmer then had to take it back
+        if (!dimmerActive()) BrightnessControl.apply(this, value255);
         if (lightsOverrideOn()) BrightnessControl.primeNightProfiles(this, value255);
         Status.putInt(this, Status.KEY_BRIGHTNESS_PCT, (int) Math.round(pct));
     }
