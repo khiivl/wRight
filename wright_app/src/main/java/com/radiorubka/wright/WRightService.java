@@ -50,6 +50,8 @@ public class WRightService extends Service implements LocationListener,
     private boolean fixSinceWake;
     private static final long GPS_LIVE_MS = 10_000;
     private long lastPositionMs, lastSentFixNanos, fixCountSince, lastFreshFixMs;
+    private int fixesSent, fixesDropped;
+    private volatile SpeedTracker.Sample lastSample;
     private final java.util.Map<String, Integer> fixCounts = new java.util.HashMap<>();
     private final SpeedTracker speedTracker = new SpeedTracker();
     private static final long BRIGHTNESS_REASSERT_DELAY_MS = 500;
@@ -335,7 +337,14 @@ public class WRightService extends Service implements LocationListener,
         Integer n = fixCounts.get(p);
         fixCounts.put(p, n == null ? 1 : n + 1);
         if (now - fixCountSince >= 10_000) {
-            if (fixCountSince != 0) Log.i(TAG, "location fixes in " + (now - fixCountSince) / 1000 + " s: " + fixCounts);
+            if (fixCountSince != 0) {
+                SpeedTracker.Sample s = lastSample;
+                Log.i(TAG, "location fixes in " + (now - fixCountSince) / 1000 + " s: " + fixCounts
+                        + ", speed to wFabia: sent " + fixesSent + ", dropped " + fixesDropped + " (pipe " + (pipe == null ? "-" : pipe.status()) + ")"
+                        + (s == null ? "" : ", last " + (s.hasSpeed ? String.format(java.util.Locale.US, "%.1f km/h", s.speedMs * 3.6) : "no speed")
+                                + " from " + s.provider + ", accuracy " + s.accuracy + " m"));
+            }
+            fixesSent = fixesDropped = 0;
             fixCounts.clear();
             fixCountSince = now;
         }
@@ -376,7 +385,9 @@ public class WRightService extends Service implements LocationListener,
             if (fixNanos > lastSentFixNanos) {
                 lastSentFixNanos = fixNanos;
                 SpeedTracker.Sample sample = speedTracker.onLocation(location);
-                if (pipe != null) pipe.sendLocation(sample.hasSpeed, sample.speedMs, sample.accuracy, sample.provider);
+                boolean sent = pipe != null && pipe.sendLocation(sample.hasSpeed, sample.speedMs, sample.accuracy, sample.provider);
+                if (sent) fixesSent++; else fixesDropped++;
+                lastSample = sample;
             }
         }
         // position, time and the schedule do not need every second: the first fix, or once a minute

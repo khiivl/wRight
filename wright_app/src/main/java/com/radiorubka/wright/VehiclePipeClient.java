@@ -230,9 +230,9 @@ public class VehiclePipeClient {
     }
 
     /** a location fix for wFabia's speed row (wRight is the only app that asks for fixes). Oneway, dropped when not connected. */
-    public void sendLocation(boolean hasSpeed, float speedMs, float accuracy, String provider) {
+    public boolean sendLocation(boolean hasSpeed, float speedMs, float accuracy, String provider) {
         IBinder s = service;
-        if (s == null) return;
+        if (s == null) return false;
         Parcel d = Parcel.obtain();
         try {
             d.writeInterfaceToken(DESCRIPTOR);
@@ -242,8 +242,10 @@ public class VehiclePipeClient {
             d.writeFloat(accuracy);
             d.writeString(provider);
             s.transact(T_LOCATION, d, null, IBinder.FLAG_ONEWAY);
+            return true;
         } catch (RemoteException ignored) {
             // the next state or rebind will sort it out
+            return false;
         } finally {
             d.recycle();
         }
