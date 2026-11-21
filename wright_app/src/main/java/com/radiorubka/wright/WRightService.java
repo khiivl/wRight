@@ -289,6 +289,15 @@ public class WRightService extends Service implements LocationListener,
             Prefs.putInt(this, PREF_LAST_DIMMED_RGB, lastDimmedRgb);
             BacklightColorControl.apply(lastDimmedRgb, true);
         }
+        // The button backlight goes out with the ignition, and what the head unit restores at its next start is "out" as well:
+        // it sends its stored headlight_enable again at every start, and a stored "lights on" lit the buttons for the moments
+        // before wRight had corrected the state. Only when wRight is the one deciding (the CAN lights state): with the ILL wire
+        // in charge the MCU keeps its own say.
+        if (Prefs.getBool(this, Prefs.KEY_LIGHTS_FROM_CAN, true) && pipe != null) {
+            McuControl.setBacklightLights(false);
+            BrightnessControl.runRoot("setprop persist.sys.headlight_enable false");
+            mcuSentState = 0;
+        }
         TimeSource.onAccOff(this);
         stopTickLoop();
         // ACC_OFF is the signal to shut everything down: the head unit goes into deep sleep. The dimmer and the
