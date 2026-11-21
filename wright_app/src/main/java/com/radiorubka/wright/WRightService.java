@@ -144,9 +144,6 @@ public class WRightService extends Service implements LocationListener,
     private static final long MANUAL_SETTLE_MS = 5_000;
     private long manualSettleUntilMs;
     private int lastSeenLive = -1;
-    /** after ACC_ON the pipe needs a moment (wFabia opens the adapter again): the last lights state holds until it is fresh */
-    private static final long WAKE_HOLD_MS = 10_000;
-    private long wakeHoldUntilMs;
     /** the user set the brightness by hand in the daytime: the day curve stays off until the next wake (ACC_ON) or sunset */
     private volatile boolean manualDayOverride;
 
@@ -259,7 +256,6 @@ public class WRightService extends Service implements LocationListener,
         accOn = true;
         cancelPendingWork();
         applyGateOpen = false;
-        wakeHoldUntilMs = SystemClock.elapsedRealtime() + WAKE_HOLD_MS;
         manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;
         lastSeenLive = -1;
         manualDayOverride = false;
@@ -293,10 +289,14 @@ public class WRightService extends Service implements LocationListener,
         // it sends its stored headlight_enable again at every start, and a stored "lights on" lit the buttons for the moments
         // before wRight had corrected the state. Only when wRight is the one deciding (the CAN lights state): with the ILL wire
         // in charge the MCU keeps its own say.
-        if (Prefs.getBool(this, Prefs.KEY_LIGHTS_FROM_CAN, true) && pipe != null) {
+        if (canMode()) {
             McuControl.setBacklightLights(false);
             BrightnessControl.runRoot("setprop persist.sys.headlight_enable false");
             mcuSentState = 0;
+            // the lights state is dropped with the ignition: nothing is held over the sleep, and after the wake the lights come
+            // on only when wFabia has a valid state from the CANable that says so
+            headlightsOn = false;
+            Status.putBool(this, Status.KEY_HEADLIGHTS_ON, false);
         }
         TimeSource.onAccOff(this);
         stopTickLoop();
@@ -529,15 +529,14 @@ public class WRightService extends Service implements LocationListener,
      * its state for several seconds after the switch goes off.
      */
     private void pollHeadlight() {
-        boolean canSource = canIsSource();
-        boolean canOn = canSource && canLightsOn;
-        // while the CAN state is fresh it alone decides; otherwise the MCU's own state (the ILL wire) is the fallback
-        boolean holdForWake = !canSource && SystemClock.elapsedRealtime() < wakeHoldUntilMs
-                && Prefs.getBool(this, Prefs.KEY_LIGHTS_FROM_CAN, true) && pipe != null;
-        boolean on = canSource ? canOn : holdForWake ? headlightsOn : SysProp.getBoolean(PROP_HEADLIGHT_STATE, false);
+        // With the CAN state in charge it alone decides, full stop: the lights are on only while wFabia's state is valid (it has
+        // frames from the CANable) and says on. No valid state - after the wake, with the CANable missing, or when wFabia is
+        // not there - means off. Only with the CAN source switched off does the MCU's own state (the ILL wire) decide.
+        boolean canMode = canMode();
+        boolean on = canMode ? canIsSource() && canLightsOn : SysProp.getBoolean(PROP_HEADLIGHT_STATE, false);
         Status.putBool(this, Status.KEY_HEADLIGHTS_ON, on);
         if (on != headlightsOn) {
-            Log.i(TAG, "headlights " + (on ? "ON" : "OFF") + " (source=" + (canSource ? "can" : "mcu") + " pipe=" + (pipe == null ? "-" : pipe.status()) + ")");
+            Log.i(TAG, "headlights " + (on ? "ON" : "OFF") + " (source=" + (canMode ? "can" : "mcu") + " pipe=" + (pipe == null ? "-" : pipe.status()) + ")");
             headlightsOn = on;
             manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;     // CarSettingService reacts to the edge
             // Order matters for latency and flashes: the dimmer's values go out first (the strip keeps its last dimmed
@@ -574,9 +573,10 @@ public class WRightService extends Service implements LocationListener,
     /** Passes the lights state on to the head unit, as measured on it: RPC_SendHeadLightState(false) is what puts the button
      *  backlight on, (true) puts it out; persist.sys.headlight_enable is what makes the system think the headlights are on
      *  (true) or off (false). So lights on = RPC(false) + property true, lights off = RPC(true) + property false. Only done
-     *  while the CAN state is the source; the RPC is repeated every 30 s because the MCU forgets it across its sleep. */
+     *  while the CAN state is in charge (also when it is invalid: that is "lights off"); the RPC is repeated every 30 s because
+     *  the MCU forgets it across its sleep. */
     private void syncMcu(boolean force) {
-        if (!canIsSource()) return;
+        if (!canMode()) return;
         int state = headlightsOn ? 1 : 0;
         long now = SystemClock.elapsedRealtime();
         boolean changed = state != mcuSentState;
@@ -587,9 +587,15 @@ public class WRightService extends Service implements LocationListener,
         mcuSentState = state;
     }
 
-    /** the CAN lights state is in charge: switched on, wFabia's state is fresh and valid */
+    /** wRight decides the lights from the CAN state (not the MCU's own wire): switched on, and the pipe exists. The state may
+     *  be invalid - then the lights are off. */
+    private boolean canMode() {
+        return Prefs.getBool(this, Prefs.KEY_LIGHTS_FROM_CAN, true) && pipe != null;
+    }
+
+    /** the CAN lights state is usable: canMode, and wFabia's state is fresh and valid */
     private boolean canIsSource() {
-        return Prefs.getBool(this, Prefs.KEY_LIGHTS_FROM_CAN, true) && pipe != null && pipe.isFresh() && canValid;
+        return canMode() && pipe.isFresh() && canValid;
     }
 
     // --- dimmer: display brightness and button backlight follow the car's dimmer wheel ---------------------------
@@ -700,7 +706,7 @@ public class WRightService extends Service implements LocationListener,
         // so it comes back at that colour (not at full) when the lights go on. Otherwise the user's colour goes back.
         // Also kept while the ignition is off: the pipe going stale then is not the lights going off, and the user's full colour
         // written now is what the head unit would come back with on wake.
-        boolean keepDimmedColour = (!headlightsOn && canIsSource()) || !accOn;
+        boolean keepDimmedColour = (!headlightsOn && canMode()) || !accOn;
         if (!keepDimmedColour) {
             BacklightColorControl.apply(Prefs.getInt(this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889));
             lastButtonsRgb = -1;
