@@ -3,6 +3,7 @@ package com.radiorubka.wright;
 import android.content.Context;
 import android.location.Location;
 import android.os.SystemClock;
+import android.provider.Settings;
 
 /**
  * Single source of truth for "what time is it right now" - nothing else in the app should call
@@ -36,17 +37,38 @@ public class TimeSource {
     private static volatile long lastGpsFixWallMillis = 0;
     private static volatile long lastGpsFixElapsedMillis = 0;
 
-    public static void onLocation(Location location) {
+    /** The fix is stamped with the elapsedRealtime at which it was actually taken (not "now"), so a
+     *  cached getLastKnownLocation() result from before a sleep projects forward correctly instead
+     *  of reading as brand new - stamping it "now" is what made the clock wrong after boot/wake
+     *  until a real fix replaced it. A fix whose own elapsed stamp is from a previous boot (ahead of
+     *  the current uptime) is ignored. If a provider doesn't fill the elapsed stamp in, a cached
+     *  result can't be trusted at all, while a live callback is treated as taken just now. */
+    public static void onLocation(Location location, boolean cached) {
         long t = location.getTime();
         if (t <= 0) return;
+        long nowElapsed = SystemClock.elapsedRealtime();
+        long fixElapsed = location.getElapsedRealtimeNanos() / 1_000_000L;
+        if (fixElapsed <= 0) {
+            if (cached) return;
+            fixElapsed = nowElapsed;
+        }
+        if (fixElapsed > nowElapsed + 1_000) return;
+        if (lastGpsFixWallMillis > 0 && fixElapsed <= lastGpsFixElapsedMillis) return;
         lastGpsFixWallMillis = t;
-        lastGpsFixElapsedMillis = SystemClock.elapsedRealtime();
+        lastGpsFixElapsedMillis = fixElapsed;
     }
 
-    /** Call right before going to sleep (on com.qf.action.ACC_OFF) to anchor the fallback. */
+    /** Call right before going to sleep (on com.qf.action.ACC_OFF) to anchor the fallback. The boot
+     *  count is stored too: elapsedRealtime restarts from zero on a reboot, so an anchor from
+     *  before one projects to a wildly wrong time and must not be used afterwards. */
     public static void onAccOff(Context context) {
         Prefs.putLong(context, Prefs.KEY_SLEEP_ANCHOR_WALL, System.currentTimeMillis());
         Prefs.putLong(context, Prefs.KEY_SLEEP_ANCHOR_ELAPSED, SystemClock.elapsedRealtime());
+        Prefs.putInt(context, Prefs.KEY_SLEEP_ANCHOR_BOOT_COUNT, bootCount(context));
+    }
+
+    private static int bootCount(Context context) {
+        return Settings.Global.getInt(context.getContentResolver(), Settings.Global.BOOT_COUNT, -1);
     }
 
     /** See DebugTimeReceiver for the adb commands that drive these. */
@@ -81,7 +103,8 @@ public class TimeSource {
         long rawWall = System.currentTimeMillis();
         long anchorWall = Prefs.getLong(context, Prefs.KEY_SLEEP_ANCHOR_WALL, 0);
         long anchorElapsed = Prefs.getLong(context, Prefs.KEY_SLEEP_ANCHOR_ELAPSED, 0);
-        if (anchorWall > 0) {
+        boolean anchorFromThisBoot = Prefs.getInt(context, Prefs.KEY_SLEEP_ANCHOR_BOOT_COUNT, -2) == bootCount(context);
+        if (anchorWall > 0 && anchorFromThisBoot) {
             long expectedWall = anchorWall + (nowElapsed - anchorElapsed);
             if (Math.abs(rawWall - expectedWall) > STALE_TOLERANCE_MS) {
                 return expectedWall;

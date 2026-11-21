@@ -31,7 +31,10 @@ import java.util.Date;
  * Foreground service that owns the whole schedule: location -> sun times -> dark mode / night
  * shift / brightness. Stays alive across com.qf.action.ACC_OFF (the unit suspends rather than
  * rebooting - see TimeSource's doc comment for why that matters) and just throttles its own
- * polling down while asleep.
+ * polling down while asleep - confirmed this does NOT match wDSP's McuService (which does the
+ * same thing), despite an earlier attempt here to instead stop/restart the whole service on
+ * every ACC cycle; BootReceiver's own ACC_ON handling remains as the safety net for the case
+ * where this service's process got killed outright while the unit was asleep, same as before.
  */
 public class WRightService extends Service implements LocationListener,
         SharedPreferences.OnSharedPreferenceChangeListener {
@@ -42,6 +45,20 @@ public class WRightService extends Service implements LocationListener,
 
     private static final String ACTION_ACC_ON = "com.qf.action.ACC_ON";
     private static final String ACTION_ACC_OFF = "com.qf.action.ACC_OFF";
+    private static final String ACTION_QUICKBOOT_POWERON = "android.intent.action.QUICKBOOT_POWERON";
+    private static final String ACTION_QUICKBOOT_POWERON_HTC = "com.htc.intent.action.QUICKBOOT_POWERON";
+    private static final String ACTION_QUICKBOOT_POWEROFF = "android.intent.action.QUICKBOOT_POWEROFF";
+    private static final String ACTION_QUICKBOOT_POWEROFF_HTC = "com.htc.intent.action.QUICKBOOT_POWEROFF";
+
+    // Wake sequence (boot, ACC_ON, quickboot). The MCU and power rails need a moment to settle, so
+    // GPS starts 500ms after the wake, the non-time-dependent config (backlight color, stock
+    // auto-dark-mode off) goes out at 1000ms, and everything time-dependent (dark mode, night
+    // shift, brightness) waits until a fresh GPS fix arrives - or, failing that, until GPS has had
+    // GPS_FALLBACK_AFTER_MS to show up, after which the last known coordinates plus the clock
+    // (TimeSource's own fallback) are used until a fix does arrive.
+    private static final long WAKE_GPS_DELAY_MS = 500;
+    private static final long WAKE_CONFIG_DELAY_MS = 1_000;
+    private static final long GPS_FALLBACK_AFTER_MS = 5_000;
 
     private static final long TICK_INTERVAL_MS = 1_500; // headlight responsiveness
     private static final long FULL_RECOMPUTE_INTERVAL_MS = 60_000; // brightness/night-shift smoothness
@@ -74,6 +91,15 @@ public class WRightService extends Service implements LocationListener,
     private double lastLat;
     private double lastLon;
     private boolean hasFix = false;
+
+    // Written from the main thread (broadcasts) and read on the worker thread.
+    private volatile boolean applyGateOpen = false;   // nothing time-dependent is applied until true (see openApplyGate)
+
+    // Named Runnables (not this::method each time) so removeCallbacks() can actually match them.
+    private final Runnable startGpsRunnable = this::startGpsStage;
+    private final Runnable gpsFallbackRunnable = this::gpsFallbackStage;
+    private final Runnable wakeConfigRunnable = this::wakeConfigStage;
+    private final Runnable reassertBrightnessRunnable = this::applyBrightness;
 
     private boolean headlightsOn = false;
     // Elapsed-realtime based (SystemClock): the wall clock of this unit jumps (GPS/NTP corrections, suspend), and a jump
@@ -140,65 +166,14 @@ public class WRightService extends Service implements LocationListener,
             if (action == null) return;
             switch (action) {
                 case ACTION_ACC_ON:
-                    accOn = true;
-                    wakeHoldUntilMs = SystemClock.elapsedRealtime() + WAKE_HOLD_MS;
-                    manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;
-                    lastSeenLive = -1;
-                    manualDayOverride = false;
-                    captureNightBrightnessIfMissing();
-                    restartLocationUpdates();
-                    startTickLoop();
-                    recomputeAndApply(true);
-                    // The ambient strip's own memory of its color doesn't necessarily survive
-                    // the MCU's side of a sleep cycle - reassert ours so it's not left stale.
-                    // If the lights were on when the ignition went off, the dimmer was driving the strip: bring it back at the
-                    // last dimmed colour. The user's full colour here is the flash of full brightness on wake; the dimmer takes
-                    // over as soon as wFabia's state is fresh again (and releaseDimmer restores the full colour if it never does).
-                    int dimmedOnWake = wakeDimmedColour();
-                    if (dimmedOnWake != -1) {
-                        BacklightColorControl.apply(dimmedOnWake, false);
-                    } else {
-                        BacklightColorControl.apply(Prefs.getInt(WRightService.this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889));
-                    }
-                    // The MCU forgets what we told it across its own sleep cycle, and CarSettings sends its stored
-                    // headlight_enable again at every start: say it again.
-                    mcuSentState = -1;
-                    NightShiftControl.invalidate();     // the colour service may have lost its state across the sleep
-                    syncMcu(true);
-                    dimmerWasActive = false;
-                    buttonsWasActive = false;
-                    lastButtonsRgb = -1;
-                    // the vehicle pipe and the dimmer start again; until wFabia's state is fresh the last known lights state holds
-                    if (pipe != null) pipe.start();
-                    updateDimmerLoop();
-                    // Belt and suspenders: if the user poked around in CarSettings and
-                    // re-enabled its own auto-dark-mode logic, put it back to sleep on every wake
-                    // rather than only once at service startup.
-                    ConfigServiceControl.disableStockAutoDarkMode(WRightService.this);
+                case ACTION_QUICKBOOT_POWERON:
+                case ACTION_QUICKBOOT_POWERON_HTC:
+                    beginWakeSequence(action);
                     break;
                 case ACTION_ACC_OFF:
-                    accOn = false;
-                    // The dimmed colour goes into the persistent property too (the one the head unit restores from on its next
-                    // start), so a restore from it comes back dim, and releaseDimmer leaves the strip alone while the ignition is off.
-                    if (headlightsOn && lastDimmedRgb != -1 && Prefs.getBool(WRightService.this, Prefs.KEY_DIMMER_ENABLED, false)) {
-                        Prefs.putInt(WRightService.this, PREF_LAST_DIMMED_RGB, lastDimmedRgb);
-                        BacklightColorControl.apply(lastDimmedRgb, true);
-                    }
-                    TimeSource.onAccOff(WRightService.this);
-                    stopTickLoop();
-                    // ACC_OFF is the signal to shut everything down: the head unit goes into deep sleep. The dimmer and the
-                    // vehicle pipe stop (the last dimmed colour and the lights state are kept for the wake), pending delayed work
-                    // is dropped and the root shell is closed. Nothing runs until ACC_ON.
-                    dimmerLoopRunning = false;
-                    bgHandler.removeCallbacks(dimmerRunnable);
-                    mainHandler.removeCallbacksAndMessages(null);
-                    if (pipe != null) pipe.stop();
-                    canValid = false;
-                    BrightnessControl.shutdown();
-                    bgHandler.removeCallbacks(locationRetry);
-                    try {
-                        locationManager.removeUpdates(WRightService.this);
-                    } catch (SecurityException ignored) {}
+                case ACTION_QUICKBOOT_POWEROFF:
+                case ACTION_QUICKBOOT_POWEROFF_HTC:
+                    beginSleep(action);
                     break;
                 case Intent.ACTION_TIME_CHANGED:
                 case Intent.ACTION_TIMEZONE_CHANGED:
@@ -234,6 +209,7 @@ public class WRightService extends Service implements LocationListener,
 
     @Override
     public void onCreate() {
+
         super.onCreate();
         workerThread = new HandlerThread("wRightWorker");
         workerThread.start();
@@ -252,17 +228,16 @@ public class WRightService extends Service implements LocationListener,
         IntentFilter filter = new IntentFilter();
         filter.addAction(ACTION_ACC_ON);
         filter.addAction(ACTION_ACC_OFF);
+        filter.addAction(ACTION_QUICKBOOT_POWERON);
+        filter.addAction(ACTION_QUICKBOOT_POWERON_HTC);
+        filter.addAction(ACTION_QUICKBOOT_POWEROFF);
+        filter.addAction(ACTION_QUICKBOOT_POWEROFF_HTC);
         filter.addAction(Intent.ACTION_TIME_CHANGED);
         filter.addAction(Intent.ACTION_TIMEZONE_CHANGED);
         registerReceiver(receiver, filter);
 
         // before anything can write the night profile keys: what is there now is the user's own
         captureNightBrightnessIfMissing();
-        restartLocationUpdates();
-        startTickLoop();
-        recomputeAndApply(true);
-        ConfigServiceControl.disableStockAutoDarkMode(this);
-
         pipe = new VehiclePipeClient(this, bgHandler, (valid, lights, level) -> {
             canValid = valid;
             canLightsOn = valid && lights;
@@ -270,8 +245,115 @@ public class WRightService extends Service implements LocationListener,
             pollHeadlight();                 // react at once, not on the next 1.5 s tick
             if (dimmerLoopRunning) dimmerStep();   // and drive the outputs now, not on the next loop tick
         });
-        pipe.start();
+
+        // A service start (boot, update, app restart) is a wake like any other.
+        beginWakeSequence("service start");
+    }
+
+    // --- wake / sleep sequence ----------------------------------------------------------------
+
+    /** Safe to call repeatedly (duplicate ACC_ON + QUICKBOOT_POWERON broadcasts): every call
+     *  cancels whatever the previous one had pending and starts over. */
+    private void beginWakeSequence(String why) {
+        Log.i(TAG, "wake sequence (" + why + "): GPS in " + WAKE_GPS_DELAY_MS + "ms, apply gate closed");
+        accOn = true;
+        cancelPendingWork();
+        applyGateOpen = false;
+        wakeHoldUntilMs = SystemClock.elapsedRealtime() + WAKE_HOLD_MS;
+        manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;
+        lastSeenLive = -1;
+        manualDayOverride = false;
+        captureNightBrightnessIfMissing();
+        NightShiftControl.invalidate();     // the colour service may have lost its state across the sleep
+        dimmerWasActive = false;
+        buttonsWasActive = false;
+        lastButtonsRgb = -1;
+        // The tick loop starts right away so headlight state keeps being tracked, but every recompute is a no-op until
+        // the gate opens.
+        startTickLoop();
+        // the vehicle pipe and the dimmer start again; until wFabia's state is fresh the last known lights state holds
+        if (pipe != null) pipe.start();
         updateDimmerLoop();
+        bgHandler.postDelayed(startGpsRunnable, WAKE_GPS_DELAY_MS);
+        bgHandler.postDelayed(wakeConfigRunnable, WAKE_CONFIG_DELAY_MS);
+    }
+
+    private void beginSleep(String why) {
+        Log.i(TAG, "sleep (" + why + "): cancelling pending wake work, stopping GPS and polling");
+        accOn = false;
+        cancelPendingWork();
+        applyGateOpen = false;
+        // The dimmed colour goes into the persistent property too (the one the head unit restores from on its next
+        // start), so a restore from it comes back dim, and releaseDimmer leaves the strip alone while the ignition is off.
+        if (headlightsOn && lastDimmedRgb != -1 && Prefs.getBool(this, Prefs.KEY_DIMMER_ENABLED, false)) {
+            Prefs.putInt(this, PREF_LAST_DIMMED_RGB, lastDimmedRgb);
+            BacklightColorControl.apply(lastDimmedRgb, true);
+        }
+        TimeSource.onAccOff(this);
+        stopTickLoop();
+        // ACC_OFF is the signal to shut everything down: the head unit goes into deep sleep. The dimmer and the
+        // vehicle pipe stop (the last dimmed colour and the lights state are kept for the wake), pending delayed work
+        // is dropped and the root shell is closed. Nothing runs until ACC_ON.
+        dimmerLoopRunning = false;
+        bgHandler.removeCallbacks(dimmerRunnable);
+        mainHandler.removeCallbacksAndMessages(null);
+        if (pipe != null) pipe.stop();
+        canValid = false;
+        BrightnessControl.shutdown();
+        try {
+            locationManager.removeUpdates(this);
+        } catch (SecurityException ignored) {}
+    }
+
+    private void cancelPendingWork() {
+        bgHandler.removeCallbacks(startGpsRunnable);
+        bgHandler.removeCallbacks(gpsFallbackRunnable);
+        bgHandler.removeCallbacks(wakeConfigRunnable);
+        bgHandler.removeCallbacks(locationRetry);
+        mainHandler.removeCallbacks(reassertBrightnessRunnable);
+    }
+
+    private void startGpsStage() {
+        restartLocationUpdates();           // registers, and again every 15 s until a fix arrives
+        bgHandler.postDelayed(gpsFallbackRunnable, GPS_FALLBACK_AFTER_MS);
+    }
+
+    private void gpsFallbackStage() {
+        if (applyGateOpen) return;
+        Log.w(TAG, "no fresh GPS fix " + GPS_FALLBACK_AFTER_MS + "ms after starting it - applying with the last known coordinates and the clock until one arrives");
+        openApplyGate("GPS fallback");
+    }
+
+    /** The settings that do not depend on the time of day, one second after the wake: the MCU and its power rails need that
+     *  moment to settle. */
+    private void wakeConfigStage() {
+        // The ambient strip's own memory of its color doesn't necessarily survive the MCU's side of a sleep cycle - reassert
+        // ours so it's not left stale. If the lights were on when the ignition went off, the dimmer was driving the strip: bring
+        // it back at the last dimmed colour. The user's full colour here is the flash of full brightness on wake; the dimmer
+        // takes over as soon as wFabia's state is fresh again (and releaseDimmer restores the full colour if it never does).
+        int dimmedOnWake = wakeDimmedColour();
+        if (dimmedOnWake != -1) {
+            BacklightColorControl.apply(dimmedOnWake, false);
+        } else {
+            BacklightColorControl.apply(Prefs.getInt(this, Prefs.KEY_BACKLIGHT_COLOR, 0x028889));
+        }
+        // The MCU forgets what we told it across its own sleep cycle, and CarSettings sends its stored
+        // headlight_enable again at every start: say it again.
+        mcuSentState = -1;
+        syncMcu(true);
+        // Belt and suspenders: if the user poked around in CarSettings and re-enabled its own auto-dark-mode logic, put it
+        // back to sleep on every wake, not only at service startup.
+        ConfigServiceControl.disableStockAutoDarkMode(this);
+    }
+
+    /** Opens the way for everything that depends on the time of day (dark mode, Night Shift, brightness): the first fresh GPS fix
+     *  of the wake, or the fallback if none arrives in time. Until then nothing time-dependent is written, so the wake does not
+     *  apply a schedule computed from a clock that is still wrong. */
+    private void openApplyGate(String why) {
+        if (applyGateOpen) return;
+        applyGateOpen = true;
+        Log.i(TAG, "apply gate open (" + why + ")");
+        recomputeAndApply(true);
     }
 
     @Override
@@ -281,10 +363,12 @@ public class WRightService extends Service implements LocationListener,
 
     @Override
     public void onDestroy() {
+        restoreSavedNightBrightness();
         super.onDestroy();
         try { unregisterReceiver(receiver); } catch (IllegalArgumentException ignored) {}
         try { locationManager.removeUpdates(this); } catch (SecurityException ignored) {}
         Prefs.get(this).unregisterOnSharedPreferenceChangeListener(this);
+        cancelPendingWork();
         stopTickLoop();
         dimmerLoopRunning = false;
         if (pipe != null) pipe.stop();
@@ -393,15 +477,21 @@ public class WRightService extends Service implements LocationListener,
         // position, time and the schedule do not need every second: the first fix, or once a minute
         if (hasFix && now - lastPositionMs < POSITION_EVERY_MS) return;
         lastPositionMs = now;
-        TimeSource.onLocation(location);
+        // a cached fix is stamped with the time it was really taken (TimeSource), so it cannot pass for a fresh clock reading
+        TimeSource.onLocation(location, !fresh);
         lastLat = location.getLatitude();
         lastLon = location.getLongitude();
         hasFix = true;
         Prefs.putLong(this, Prefs.KEY_LAST_LAT, Double.doubleToLongBits(lastLat));
         Prefs.putLong(this, Prefs.KEY_LAST_LON, Double.doubleToLongBits(lastLon));
-        Prefs.putLong(this, Prefs.KEY_LAST_FIX_TIME, System.currentTimeMillis());
         Status.putDouble(this, Status.KEY_LAT, lastLat);
         Status.putDouble(this, Status.KEY_LON, lastLon);
+        // Coordinates are kept either way, but only a live fix opens the apply gate: a cached one does not count as the GPS
+        // having arrived.
+        if (fresh && !applyGateOpen) {
+            openApplyGate("fresh GPS fix");
+            return;
+        }
         recomputeAndApply(true);
     }
 
@@ -639,43 +729,109 @@ public class WRightService extends Service implements LocationListener,
 
     private void doRecomputeAndApply(boolean fullTick) {
         if (!accOn) return;     // asleep: nothing is computed or written until ACC_ON
+        if (!applyGateOpen) {
+            // Wake sequence in progress: nothing time-dependent is applied until a fresh GPS fix arrives or the fallback
+            // fires (see openApplyGate()).
+            Log.i(TAG, "doRecomputeAndApply: waiting for GPS or the fallback, not applying yet");
+            return;
+        }
         if (!hasFix) {
-            // The single most likely reason "nothing reacts at all" looks identical to a broken
-            // broadcast/tick loop: every recompute bails out right here until the first GPS fix
-            // ever lands. Logging it so that's distinguishable from an actually-dead loop.
-            Log.i(TAG, "doRecomputeAndApply: no GPS fix yet, skipping");
+            // No coordinates at all yet (first run ever, nothing cached): can't compute a
+            // schedule. Logged so that's distinguishable from an actually-dead loop.
+            Log.i(TAG, "doRecomputeAndApply: no coordinates yet, skipping");
             updateNotification(null, null);
             return;
         }
 
         long now = TimeSource.nowMillis(this);
+
         SunCalculator.SunTimes sun = computeEffectiveSunTimes(now);
+
+        // Is true if it's night, false if it's day
         boolean nightWindow = now < sun.sunriseUtcMillis || now >= sun.sunsetUtcMillis;
 
+        // Time-based logic
         Status.putLong(this, Status.KEY_NOW_MILLIS, now);
         Status.putLong(this, Status.KEY_SUNRISE_MILLIS, sun.sunriseUtcMillis);
         Status.putLong(this, Status.KEY_SUNSET_MILLIS, sun.sunsetUtcMillis);
 
+        // Checking which functions are enabled
         boolean darkModeEnabled = Prefs.getBool(this, Prefs.KEY_DARK_MODE_ENABLED, true);
         boolean lightsOverrideEnabled = Prefs.getBool(this, Prefs.KEY_LIGHTS_OVERRIDE_ENABLED, false);
 
+        // Is true if Dark Mode is on and it's night currently
         boolean scheduleWantsDark = darkModeEnabled && nightWindow;
+
+        // Is true if Lights Override is enabled and the headlights are on
         boolean lightsForceDark = lightsOverrideEnabled && headlightsOn;
+
+        // Is true if it's time to set the dark mode or the lights are on
         boolean effectiveDark = scheduleWantsDark || lightsForceDark;
         lastEffectiveDark = effectiveDark;
+
+        // Get current saved night brightness values
+        int headlightSaved = Prefs.getInt(this, Prefs.KEY_SAVED_NIGHT_HEADLIGHT_BRIGHTNESS, -1);
+        int noHeadlightSaved = Prefs.getInt(this, Prefs.KEY_SAVED_NIGHT_NO_HEADLIGHT_BRIGHTNESS, -1);
+
+        // If the service has just started, this is the first loop
+        if (lastNightWindow == null) {
+            // And there's no saved night brightness values yet, we capture the night brightness;
+            // Truly the first start after installation.
+            if (headlightSaved == -1 || noHeadlightSaved == -1) {
+                        captureNightBrightness();
+            }
+            // And there ARE saved brightness values
+            else {
+                // And it's currently night
+                if (nightWindow) {
+                    // We restore the saved brightness values. This prevents the brightness being at the day value
+                    // in the night after service restart.
+                    restoreSavedNightBrightness();
+                }
+            }
+
+        }
 
         // Edge-detect the real (clock-based) day<->night transition - deliberately independent of
         // effectiveDark/Lights Override, which can flip uiMode mid-day and must NOT be mistaken
         // for the genuine transition. Restoring the user's real night brightness has to happen
         // BEFORE setDark() below fires the TEST_UIMODE broadcast, since CarSettingService resolves
-        // its brightness profile synchronously off that same broadcast.
+        // its brightness profile synchronously off that same broadcast. This MUST run before the
+        // "cyclically capture" block below: on the very first tick of a new night, the table still
+        // holds whatever daytime value was primed into it moments ago, which almost always differs
+        // from last night's saved value - if the cyclic-capture check ran first, it would read
+        // that stale daytime value as if it were a deliberate user adjustment and immediately
+        // clobber the real saved preference with it, so restoreSavedNightBrightness() right after
+        // would just restore the wrong, just-clobbered value instead of the real one.
+
+        // We restore the brightness if the loop has already ran once,
+        // it was daytime before and it's night right now.
         if (lastNightWindow != null && !lastNightWindow && nightWindow) {
             manualDayOverride = false;                 // a new night: the next day starts with the curve again
             restoreSavedNightBrightness();
-        } else if (lastNightWindow != null && lastNightWindow && !nightWindow) {
+        }
+        // We capture the brightness if the loop has already ran once,
+        // it was night time before and it's day right now.
+        else if (lastNightWindow != null && lastNightWindow && !nightWindow) {
             captureNightBrightness();
         }
+
+        // Save the last night window state for the next loop.
         lastNightWindow = nightWindow;
+
+        // Cyclically capture the brightness values in the night. This will save the values to the
+        // preferences so that they can be restored the next day:
+
+        // If it's night
+        if (nightWindow) {
+            // Get the current brightness values for the night
+            int headlight = BrightnessControl.readNightHeadlight(this);
+            int noHeadlight = BrightnessControl.readNightNoHeadlight(this);
+            // If they have changed - capture and save.
+            if (headlight != headlightSaved || noHeadlight != noHeadlightSaved) {
+                captureNightBrightness();
+            }
+        }
 
         boolean currentlyDark = ThemeControl.isDarkActive(this);
 
@@ -713,11 +869,13 @@ public class WRightService extends Service implements LocationListener,
 
         if (currentlyDark != effectiveDark) manualSettleUntilMs = SystemClock.elapsedRealtime() + MANUAL_SETTLE_MS;   // the uiMode flip re-resolves brightness
         ThemeControl.setDark(this, effectiveDark);
+
         if (enteringNightLightsOn || enteringDayHeadlightsOff) {
             // Give CarSettingService's resolver time to actually stomp screen_brightness off its
             // broadcast first, then correct it - reacting synchronously here would just get
             // overwritten moments later once that resolution actually runs.
-            mainHandler.postDelayed(this::applyBrightness, BRIGHTNESS_REASSERT_DELAY_MS);
+            mainHandler.removeCallbacks(reassertBrightnessRunnable);
+            mainHandler.postDelayed(reassertBrightnessRunnable, BRIGHTNESS_REASSERT_DELAY_MS);
         }
 
         // Every tick, not only every 60 s: NightShiftControl compares with what the system really has and writes only a

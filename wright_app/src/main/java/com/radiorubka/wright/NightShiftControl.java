@@ -28,6 +28,7 @@ public class NightShiftControl {
     private static final String TAG = "wRight_NightShift";
     private static final String KEY_ACTIVATED = "night_display_activated";
     private static final String KEY_TEMPERATURE = "night_display_color_temperature";
+    private static final String KEY_AUTO_MODE = "night_display_auto_mode";
 
     // Confirmed on real K706 hardware: the stock slider writes 1 at its warmest end and 64 at
     // its neutral/off end.
@@ -65,6 +66,15 @@ public class NightShiftControl {
         // stays the way to see what is applied. After a start or a wake (resync) both are sent once whatever the keys say.
         boolean force = resync;
         resync = false;
+        // The system's own Night Light schedule (custom hours / twilight) flips night_display_activated by itself at its
+        // boundaries and on init after a wake: with it on it fights wRight and can switch Night Shift off behind its back.
+        // wRight is the schedule, so the system's is turned off - only when it is on, to avoid pointless writes.
+        if (featureEnabled && getIntSafely(context, KEY_AUTO_MODE, 0) != 0) {
+            Log.w(TAG, "reconcile: system night_display_auto_mode was on, turning it off");
+            if (!BrightnessControl.runRoot("settings put secure " + KEY_AUTO_MODE + " 0") && hasPermission(context)) {
+                putIntSafely(context, KEY_AUTO_MODE, 0);
+            }
+        }
         int wantActivated = featureEnabled ? 1 : 0;
         int haveActivated = getIntSafely(context, KEY_ACTIVATED, -1);
         int haveLevel = getIntSafely(context, KEY_TEMPERATURE, -1);

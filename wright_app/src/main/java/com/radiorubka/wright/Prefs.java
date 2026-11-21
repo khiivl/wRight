@@ -49,6 +49,7 @@ public class Prefs {
     // TimeSource sleep anchor - see TimeSource.onAccOff()/correctedNowMillis()
     public static final String KEY_SLEEP_ANCHOR_WALL = "sleep_anchor_wall";
     public static final String KEY_SLEEP_ANCHOR_ELAPSED = "sleep_anchor_elapsed";
+    public static final String KEY_SLEEP_ANCHOR_BOOT_COUNT = "sleep_anchor_boot_count";
 
     // TimeSource debug override (DebugTimeReceiver, adb-only) - the "debug_" prefix keeps these
     // out of Export/Import (see exportToJson below), since a simulated clock has no business in

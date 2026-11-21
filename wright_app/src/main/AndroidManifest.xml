@@ -47,13 +47,19 @@
         <receiver
             android:name="com.radiorubka.wright.BootReceiver"
             android:enabled="true"
-            android:exported="true"
-            android:directBootAware="true">
+            android:exported="true">
+            <!-- Deliberately NOT directBootAware and not listening for LOCKED_BOOT_COMPLETED /
+                 USER_UNLOCKED / REBOOT: starting this early races the OS's own storage and MCU
+                 bring-up (see wRight_Boot_Start_Spec.md). ACC_ON is kept (not in the spec's list,
+                 but it isn't an early-boot event) as a safety net: this head unit aggressively
+                 kills background processes, so the service may be dead by the time the unit wakes;
+                 starting an already-running service is a no-op, and the running service handles
+                 ACC_ON/ACC_OFF itself. -->
             <intent-filter android:priority="0">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="com.qf.action.ACC_ON" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
